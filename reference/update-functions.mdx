@@ -1,7 +1,7 @@
 ---
-title: "Tab Update and Utility Functions Reference"
+title: "Update and Utility Functions – Arsinous V8 Reference"
 sidebarTitle: "Update Functions"
-description: "Apps Script functions for refreshing sheet tabs, managing date ranges, computing running balances, and the onOpen/onEdit triggers."
+description: "Apps Script functions for refreshing sheet tabs, managing date ranges, computing running balances, and the onOpen/onEdit triggers in Arsinous V8 Sales."
 ---
 
 This reference covers the cross-cutting utility functions that tie Arsinous V8 Sales together: the `onOpen` and `onEdit` spreadsheet triggers, the sidebar and user-property helpers, the generic tab router `updateCurrentTab`, date-range logic used by every query-driven refresh, the **All Balances** and **Balance** tab writers, inventory sync, and the two custom Sheets formulas for running balance and accounts receivable aging. These functions live across `Updates.gs`, `Formulas.gs`, `SoA.gs`, `onOpen.gs`, `onEdit.gs`, and `sidebar/backend.gs`.
@@ -486,6 +486,23 @@ Same validation as `editInvoiceOrNote`, then shows a confirmation dialog and —
 </ParamField>
 
 The confirmation dialog reads: `"Are you sure you want to delete <type> with id:<id>"`. If the user clicks YES, `deleteInvoice(id)` is called. If NO, a toast `"Operation canceled."` is shown.
+
+```javascript
+function deleteInvoiceOrNote(type) {
+  // ... validation identical to editInvoiceOrNote ...
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.alert("Delete " + type, " Are you sure you want to delete " + type + " with id:" + id, ui.ButtonSet.YES_NO);
+  if (response == response.YES) {  // bug: should be ui.Button.YES
+    deleteInvoice(id);
+  } else {
+    ss.toast("Operation canceled.");
+  }
+}
+```
+
+<Warning>
+  The confirmation check in the source is `if (response == response.YES)`. This is a bug — `response` is a `ui.Button` enum value, and `response.YES` is `undefined`, so the condition is always falsy. In practice this means the deletion branch is **never reached** and the function always toasts "Operation canceled." regardless of what button the user clicks. The correct check would be `if (response == ui.Button.YES)`.
+</Warning>
 
 <Warning>
   Deletion is permanent and cannot be undone from the UI. The linked Google Sheets invoice file is **not** removed from Drive — only the database records are deleted. See [`deleteInvoice`](/reference/invoice-functions#deleteinvoice) for the full deletion behavior.

@@ -1,7 +1,7 @@
 ---
-title: "Product Script Functions Reference"
+title: "Product Functions – Arsinous V8 Sales Script Reference"
 sidebarTitle: "Product Functions"
-description: "Apps Script functions for displaying, creating, editing, and syncing products between Google Sheets and the MySQL products table."
+description: "Apps Script functions for displaying, creating, editing, and syncing products between Google Sheets and the MySQL products table in Arsinous V8."
 ---
 
 The product module manages the catalog of goods tracked in Arsinous V8 Sales. It provides a modal dialog for creating and editing product records, a sheet sync function that rewrites the **Products** tab from the MySQL `products` table, and an edit helper that works from either the **Products** or **Inventory** sheet. Products carry pricing tiers (cost, price, retail), a VAT code, and default discount rules that drive the invoice line-item calculations. All persistent changes route through [`saveProductToDb`](/reference/db-functions#saveproducttodb), which handles the INSERT/UPDATE and triggers a sheet refresh.

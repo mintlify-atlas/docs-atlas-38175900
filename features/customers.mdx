@@ -22,7 +22,7 @@ The Customers sheet contains one customer per row. Columns are mapped automatica
 | H | `phone` | Phone number(s) |
 | I | `details` | Free-text notes and additional details |
 | J | `folder` | Google Drive folder ID |
-| K | *(generated)* | Clickable Drive folder hyperlink |
+| K | *(generated)* | Clickable Drive folder hyperlink — written to the **second-to-last** column (`lastCol - 1`) |
 
 <Note>
   The **Customers** sheet must exist with these exact column headers in row 1 before running `updateCustomers`. The sync function maps MySQL column names to sheet headers by name — any mismatch will leave that column blank.
@@ -87,7 +87,7 @@ To trigger a sync, go to **Arsinous menu → Update Current Tab** while the Cust
     Click **Add** in the Arsinous sidebar, or navigate to **Arsinous menu → Add Customer**. This calls `showCustomer()` with no arguments, so the form opens pre-filled with `DefaultCustomer` defaults (all fields null).
   </Step>
   <Step title="Fill in the customer details">
-    The modal dialog (600 × 650 px, built with Vuetify) presents the following fields:
+    The modal dialog (600 × 650 px, built with Vue.js and Buefy) presents the following fields:
 
     - **Code** — required; must match the format `NN-NN LLL` (validated before save)
     - **Name** — required

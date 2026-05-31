@@ -1,7 +1,7 @@
 ---
-title: "Database Helper Functions Reference"
+title: "DB Helper Functions – Arsinous V8 Sales Script Reference"
 sidebarTitle: "DB Functions"
-description: "Low-level Apps Script JDBC helper functions for querying and writing data to MySQL, used internally by all feature modules."
+description: "Low-level Apps Script JDBC helper functions for reading and writing data to MySQL, used internally by all feature modules in Arsinous V8 Sales."
 ---
 
 The DB layer provides the raw JDBC plumbing that every feature module in Arsinous V8 Sales builds on. Rather than opening connections and iterating result sets in every individual function, the codebase centralises these patterns into a small set of helpers. `getFrom.gs` contains read-only query functions that return parsed results as arrays or JSON strings. `saveTo.gs` contains write functions — INSERT, UPDATE, DELETE — along with post-save sheet refresh calls to keep the spreadsheet in sync. The connection constants (`InstanceUrl`, `User`, `UserPwd`) are defined in `Constants.gs` and used by all functions here.
@@ -150,6 +150,14 @@ function getItemsFromDB(id, table, col, conn) {
 <Warning>
   `getItemsFromDB` always closes the connection it uses, even if one was passed in. Do not pass a connection that must remain open for subsequent operations.
 </Warning>
+
+<Note>
+  The `col` parameter (the filter column name) is shadowed inside the function body by the loop variable `var col = 0` in the `for` loop that iterates result set columns. This is a known issue in the source: within the loop, `col` refers to the numeric iterator, not the string column name passed as the fourth parameter. The function still behaves correctly because the `col` parameter is only used before the loop (to build the query string), but the shadowing may cause confusion when reading the source.
+</Note>
+
+<Note>
+  The source contains a dead `throw` statement after the `return`: `throw new Error("No such ID exist (" + id + ")")`. Because it is placed after `return JSON.stringify(output)`, this line is never reached and has no effect. The function always returns the (possibly empty) JSON array — it does not throw when no rows are found.
+</Note>
 
 ---
 

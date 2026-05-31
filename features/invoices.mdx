@@ -1,7 +1,7 @@
 ---
 title: "Create and Manage Invoices and Credit Notes"
 sidebarTitle: "Invoices"
-description: "Issue invoices and credit notes from within Google Sheets. Each document is saved to MySQL, adjusts lot inventory, and generates a linked Google Sheets invoice file."
+description: "Issue invoices and credit notes from Google Sheets. Saves to MySQL, adjusts lot-level inventory, and generates a linked Google Sheets invoice document."
 ---
 
 Invoices are the centrepiece of Arsinous V8 Sales. When you create an invoice, the system does much more than record a sale — it decrements the specific inventory lots you're selling from, writes the transaction into MySQL inside a database transaction, generates a formatted Google Sheets invoice document from a template, places a shortcut to that document in the customer's Drive folder, and writes a hyperlink back into the Invoices sheet. The same machinery runs for credit notes, with stock adjustments reversed to reflect returned goods.
@@ -40,7 +40,7 @@ Results are first sorted by `date DESC` from MySQL, then re-sorted by `id ASC` i
 
 <Steps>
   <Step title="Open the invoice dialog">
-    Go to **Arsinous menu → Create Invoice** or click **New Invoice** in the sidebar. This calls `showInvoice(null, "invoice")`, which opens a 1000 × 600 px Vuetify modal. On load, the modal fetches all customers, products, in-stock inventory lots (`irs_items WHERE in_stock > 0`), salesperson records, and customer discounts from MySQL in parallel.
+    Go to **Arsinous menu → Create Invoice** or click **New Invoice** in the sidebar. This calls `showInvoice(null, "invoice")`, which opens a 1000 × 600 px Vue.js/Buefy modal. On load, the modal fetches all customers, products, in-stock inventory lots (`irs_items WHERE in_stock > 0`), salesperson records, and customer discounts from MySQL in parallel.
   </Step>
   <Step title="Select a customer and date">
     Use the **Customer** autocomplete (top-left) to search and select a customer. Only customers with `status = "active"` appear. Set the **Date** using the date-picker (defaults to today). The **Invoice #** field is auto-populated from `getNextId()` — a zero-padded 6-digit string based on the `AUTO_INCREMENT` value of the `invoices` table.
@@ -121,13 +121,22 @@ function createInvoiceSs(ssId, data) {
 
 Inserts all items into `invoices_items` with fields: `invoice_id`, `product_id`, `lot_id`, `qty`, `price`, `discount`, `fixed_discount`, `manual_discount`, `code`, `cost`, `priceAfterDiscount`.
 
-**6. Update the invoice spreadsheet content**
+**6. Persist the spreadsheet ID and commit**
 
-`updateInvoiceSs(ssId, data)` opens the invoice Google Sheets file and writes customer code, date, invoice number, salesperson, and the full items grid (columns A–O, rows 15–54).
+Executes `UPDATE invoices SET ss_id = '...' WHERE id = '...'` to store the Drive file ID back on the invoice record, then calls `conn.commit()` to finalise all database changes atomically. The connection is then closed.
 
-**7. Commit the transaction**
+**7. Update the invoice spreadsheet content**
 
-`conn.commit()` finalises all database changes. The connection is then closed before the Drive and Sheets operations run.
+After the transaction is committed and the connection is closed, `updateInvoiceSs(ssId, data)` opens the invoice Google Sheets file and writes to these specific cells:
+
+| Cell / Range | Value written |
+|--------------|---------------|
+| `K6` | `data.customer.code` |
+| `K7` | `data.date` |
+| `K8` | Zero-padded invoice number (`"000000" + data.id` sliced to 6 digits) |
+| `J1` | `data.customer.details` |
+| `B8` | Salesperson code (`data.sp.code`), or blank if no salesperson |
+| `A15:O54` | Line items grid — cleared first, then filled from row 15 with 15 columns per item row |
 
 ## Editing an Invoice
 

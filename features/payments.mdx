@@ -28,10 +28,10 @@ The P&D sheet displays payments in reverse chronological order (most recent firs
 | C1 | Start date | Lower bound of the payment date range |
 | C2 | End date | Upper bound of the payment date range |
 | E1 | Deposit filter type | `"Payments w/o Deposits"`, `"Payments with Deposits"`, or all |
-| D4 (index `[3][5]`) | Customer ID | Filter to a single customer; leave blank for all |
+| F4 (read as `data[3][5]`) | Customer ID | Filter to a single customer; leave blank for all |
 
 <Note>
-  The P&D sheet has an `onEdit` trigger: editing cells **C1**, **C2**, **E1**, or **C4** automatically calls `updateCustomersPayments()` and refreshes the data. You do not need to use the menu — just change a filter value and the sheet updates itself.
+  The P&D sheet has an `onEdit` trigger: editing cells **C1**, **C2**, **E1**, or **C4** automatically calls `updateCustomersPayments()` and refreshes the data. You do not need to use the menu — just change a filter value and the sheet updates itself. Note that **C4** is the trigger cell; the customer ID value the query uses is read from **F4** (`data[3][5]` in the sheet's 0-based value array).
 </Note>
 
 ## Syncing Payments
@@ -89,7 +89,7 @@ You can also trigger a manual refresh via **Arsinous menu → Update Current Tab
 
 <Steps>
   <Step title="Open the payment dialog">
-    Click **New Payment** in the sidebar or go to **Arsinous menu → Add Payment**. This calls `showPayment(null)`, which opens an 800 × 350 px Vuetify modal titled **Create Customer Payment**. The modal fetches the full customer list from MySQL on mount.
+    Click **New Payment** in the sidebar or go to **Arsinous menu → Add Payment**. This calls `showPayment(null)`, which opens an 800 × 350 px Vue.js/Buefy modal titled **Create Customer Payment**. The modal fetches the full customer list from MySQL on mount.
   </Step>
   <Step title="Select a customer">
     Use the **Customer** autocomplete to find and select the paying customer. The **Save** button remains disabled until a customer is chosen.

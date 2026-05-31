@@ -1,7 +1,7 @@
 ---
-title: "Arsinous V8 Sales: Google Sheets Sales Platform"
+title: "Arsinous V8 Sales: Google Sheets Sales Management Platform"
 sidebarTitle: "Introduction"
-description: "Arsinous V8 Sales is a Google Apps Script system connecting Google Sheets to MySQL for end-to-end sales management across customers, invoices, and inventory."
+description: "Arsinous V8 Sales is a Google Apps Script system connecting Google Sheets to MySQL for end-to-end sales management: customers, invoices, and inventory."
 ---
 
 Arsinous V8 Sales turns a standard Google Spreadsheet into a full-featured sales back-office. It connects directly to your MySQL database via Google's JDBC service, surfaces rich modal dialogs built with Vue.js and Vuetify, and keeps every sheet tab in sync with a single menu click or cell edit — all without leaving Google Workspace.
@@ -38,7 +38,7 @@ Sales teams working inside Google Workspace need more than a static spreadsheet.
                     └──────────────┘
 ```
 
-**Apps Script backend** — All server-side logic lives in `.gs` files organised by domain (`Customer/`, `product/`, `invoice/`, `Payment/`, `DB/`, `sidebar/`, plus root-level utility scripts). Google Apps Script executes these files server-side in V8 (see [Setup](/setup) for the current runtime note).
+**Apps Script backend** — All server-side logic lives in `.gs` files organised by domain (`Customer/`, `product/`, `invoice/`, `Payment/`, `DB/`, `sidebar/`, plus root-level utility scripts). Google Apps Script executes these files server-side (see [Setup](/setup) for the current runtime version and migration note).
 
 **HTML modal dialogs** — Each domain has a matching `index.html` file rendered as a sidebar or modal dialog using `HtmlService`. The UI is built with Vue.js and Vuetify, communicating with the backend through `google.script.run`.
 
@@ -59,14 +59,16 @@ function onOpen(e) {
   ui.createMenu("Arsinous")
     .addItem("Sidebar", "showSidebar")
     .addItem("Update Current Tab", "updateCurrentTab")
-    .addSeparator()
-    .addItem("GET Discounts", "getDiscounts")
-    .addItem("SAVE Discounts", "saveDiscounts")
-    .addToUi();
+    
+   .addSeparator()
+   .addItem("GET Discouts", "getDiscounts")
+   .addItem("SAVE Discouts", "saveDiscounts")
+   .addToUi();  
 
-  if (e && e.authMode != ScriptApp.AuthMode.NONE) {
-    showSidebar();
-  }
+   if( e && e.authMode != ScriptApp.AuthMode.NONE ){
+     showSidebar();
+   }
+   
 }
 ```
 
@@ -98,7 +100,7 @@ The spreadsheet is organised into nine dedicated tabs:
 
 ## Runtime
 
-Arsinous V8 Sales targets the **Google Apps Script V8 runtime** (Chrome V8 engine), enabling modern JavaScript syntax throughout the codebase. See the [Setup guide](/setup) for the current `appsscript.json` runtime status and migration note.
+Arsinous V8 Sales is **migrating to the Google Apps Script V8 runtime** (Chrome V8 engine). The current `appsscript.json` in the repository sets `"runtimeVersion": "DEPRECATED_ES5"` — the migration to `"V8"` is in progress. See the [Setup guide](/setup) for the current manifest content and instructions on updating the runtime before deploying.
 
 <Note>
   Arsinous V8 Sales requires a **Google Workspace** account (free @gmail.com accounts cannot use certain Apps Script services such as `HtmlService` sidebar widths or advanced Drive features). Your MySQL server must also be publicly reachable on **port 3306** from Google's server infrastructure — private or firewalled databases require a tunnel or allowlist.

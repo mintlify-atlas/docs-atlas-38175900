@@ -1,7 +1,7 @@
 ---
-title: "Customer Script Functions Reference"
+title: "Customer Functions – Arsinous V8 Sales Reference"
 sidebarTitle: "Customer Functions"
-description: "Apps Script functions for displaying, creating, editing, and syncing customers between Google Sheets and the MySQL customers table."
+description: "Apps Script functions for displaying, creating, editing, and syncing customers between Google Sheets and the MySQL customers table in Arsinous V8."
 ---
 
 The customer module handles the full lifecycle of customer records inside Arsinous V8 Sales. It bridges the Google Sheets "Customers" tab and the MySQL `customers` table, providing modal dialogs for creating and editing customer data, a sync function that rewrites the sheet from the database on demand, and a shortcut to navigate directly to a customer's linked Google Drive folder. All write operations are ultimately routed through [`saveCustomerToDb`](/reference/db-functions#savecustomertodb) in the DB layer, which manages Drive folder creation for new customers and issues the correct INSERT or UPDATE statement.

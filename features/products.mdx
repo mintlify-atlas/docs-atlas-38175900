@@ -94,7 +94,7 @@ Trigger a sync via **Arsinous menu → Update Current Tab** while the Products s
 
 ## Adding a New Product
 
-Open the Add Product dialog from **Arsinous menu → Add Product** or the sidebar **Add** button. This calls `showProduct(null)`, which opens a 600 × 600 px Vuetify modal pre-filled with `DefaultProduct` defaults:
+Open the Add Product dialog from **Arsinous menu → Add Product** or the sidebar **Add** button. This calls `showProduct(null)`, which opens a 600 × 600 px Vue.js/Buefy modal pre-filled with `DefaultProduct` defaults:
 
 ```javascript
 // Constants.gs
@@ -110,7 +110,7 @@ var DefaultProduct = {
 };
 ```
 
-Fill in the fields and click **Save**. The dialog calls `saveProductToDb(data)`, which executes an `INSERT INTO products` statement.
+Fill in the fields and click **Save**. The dialog calls `saveProductToDb(data)`, which executes an `INSERT INTO products` statement with fields: `code`, `name`, `cat`, `vat_code`, `price`, `retail`, `def_discount`, `def_fixed_discount`. Note that `cost` is **not** included in the INSERT — it must be set via an UPDATE after creation if needed. When editing an existing product, `cost` is included in the `UPDATE products SET` statement.
 
 ## Editing an Existing Product
 

@@ -1,7 +1,7 @@
 ---
-title: "Payment Script Functions Reference"
+title: "Payment Functions – Arsinous V8 Sales Script Reference"
 sidebarTitle: "Payment Functions"
-description: "Apps Script functions for creating, editing, and deleting customer payments in the customers_payments MySQL table."
+description: "Apps Script functions for creating, editing, and deleting customer payments, and refreshing the P&D sheet from the customers_payments MySQL table."
 ---
 
 The payment module records money received from customers — including cheque payments, bank transfers, and deposits. Each payment row in the MySQL `customers_payments` table carries an optional deposit date and deposit reference number, which lets the **P&D** (Payments & Deposits) sheet filter for undeposited versus deposited payments. The functions here cover the dialog entry points, sheet-level row selectors for edit and delete, and the query-driven refresh of the P&D sheet. Persistent changes are handled by [`saveCustomerPaymentToDb`](/reference/db-functions#savecustomerpaymenttodb) and [`deleteCustomerPayment`](/reference/db-functions#deletecustomerpayment) in the DB layer.

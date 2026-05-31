@@ -107,7 +107,7 @@ The sheet is written starting at row 3, with a header row followed by data rows.
 |--------|---------|----------------------------------------|-------------------------------------|
 | A      | Id      | `invoices.id`                          | `customers_payments.id`             |
 | B      | Date    | `invoices.date`                        | `customers_payments.date`           |
-| C      | Type    | `invoices.type` (e.g. `"invoice"`, `"credit note"`) | `invoices.type` (e.g. `"Payment"`) |
+| C      | Type    | `invoices.type` (e.g. `"invoice"`, `"credit note"`) | `customers_payments.type` (e.g. `"Payment"`) |
 | D      | Name    | `invoices.name`                        | `customers_payments.num`            |
 | E      | Amount  | `invoices.total`                       | *(blank)*                           |
 | F      | VAT     | `invoices.vat`                         | *(blank)*                           |

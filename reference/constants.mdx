@@ -1,10 +1,10 @@
 ---
-title: "Constants and Default Values Reference"
+title: "Constants and Default Values — Arsinous V8 Sales"
 sidebarTitle: "Constants"
-description: "All global constants defined in Constants.gs — database connection variables, Google Drive IDs, default object shapes, and VAT code definitions."
+description: "All global constants in Constants.gs — database credentials, Google Drive IDs, default object shapes, and VAT rate definitions for Arsinous V8 Sales."
 ---
 
-`Constants.gs` is the single source of truth for every value that is shared across the Arsinous V8 Sales Apps Script project. Because Apps Script loads all `.gs` files into the same global scope before execution, every `var` declared here is directly accessible from `invoice/backend.gs`, `Customer/backend.gs`, `product/backend.gs`, `Payment/backend.gs`, `Discounts.gs`, `Updates.gs`, `SoA.gs`, and the JDBC helper files in `DB/`. No import or require statement is needed — if it is declared in `Constants.gs`, it is available everywhere.
+`Constants.gs` is the single source of truth for every value that is shared across the Arsinous V8 Sales Apps Script project. Because Apps Script loads all `.gs` files into the same global scope before execution, every `var` declared here is directly accessible from `invoice/backend.gs`, `Customer/backend.gs`, `product/backend.gs`, `Payment/backend.gs`, `Discounts.gs`, `Updates.gs`, `SoA.gs`, and the JDBC helper files in `DB/`. No import or `require` statement is needed — if it is declared in `Constants.gs`, it is available everywhere.
 
 <Warning>
   `User`, `UserPwd`, and `InstanceUrl` contain MySQL credentials stored in plain text inside the script source. Anyone with read access to the Apps Script project can see the database password. For a production deployment, remove these hard-coded values and read them at runtime using `PropertiesService.getScriptProperties().getProperty('DB_USER')` (and equivalent keys for `DB_PASSWORD` and `DB_URL`). Script properties are encrypted at rest and are not visible to collaborators who can only view the script.
@@ -19,7 +19,7 @@ These three variables are passed to every `Jdbc.getConnection()` call throughout
 ### `User`
 
 ```javascript
-var User = 'kpwzwvpsby';
+var User = '<mysql-username>';
 ```
 
 MySQL username used to authenticate all JDBC connections.
@@ -29,7 +29,7 @@ MySQL username used to authenticate all JDBC connections.
 ### `UserPwd`
 
 ```javascript
-var UserPwd = '2pWmMGuC7h';
+var UserPwd = '<mysql-password>';
 ```
 
 MySQL password corresponding to `User`.
@@ -39,7 +39,7 @@ MySQL password corresponding to `User`.
 ### `InstanceUrl`
 
 ```javascript
-var InstanceUrl = 'jdbc:mysql://142.93.99.189:3306/kpwzwvpsby?useUnicode=yes&characterEncoding=UTF-8';
+var InstanceUrl = 'jdbc:mysql://<db-host>:3306/<db-name>?useUnicode=yes&characterEncoding=UTF-8';
 // Pattern: 'jdbc:mysql://<public DB address>:3306/<DB NAME>'
 ```
 
@@ -61,7 +61,7 @@ Full JDBC connection URL. The query-string parameters have specific purposes:
 ### `CUSTOMERS_FOLDER`
 
 ```javascript
-var CUSTOMERS_FOLDER = "1NWoRdqhx9QMLQYXHLd0rs5yxy5C1--Og";
+var CUSTOMERS_FOLDER = "<google-drive-folder-id>";
 ```
 
 Google Drive folder ID of the top-level customers directory. When a new customer is created without a pre-existing `folder` value, `saveCustomerToDb` calls `DriveApp.getFolderById(CUSTOMERS_FOLDER).createFolder(data.name)` and stores the resulting sub-folder ID in `customers.folder`. Replace this value with the ID of your own Drive folder.
@@ -71,7 +71,7 @@ Google Drive folder ID of the top-level customers directory. When a new customer
 ### `InvoiceTemplate`
 
 ```javascript
-var InvoiceTemplate = "14JRcFm2XRjBSkr7epRI1tNJrG081IMegHQycWLeu0VI";
+var InvoiceTemplate = "<google-sheets-template-file-id>";
 ```
 
 Google Sheets file ID of the master invoice template. `createInvoiceSs` calls `DriveApp.getFileById(InvoiceTemplate).makeCopy(...)` to produce a new invoice sheet for each document. The copy is named with the zero-padded invoice ID (e.g. `"000042"`). The template must contain a sheet tab named `"Invoice"` with the cell layout that `updateInvoiceSs` writes into.
@@ -81,7 +81,7 @@ Google Sheets file ID of the master invoice template. `createInvoiceSs` calls `D
 ### `InvoiceFolder`
 
 ```javascript
-var InvoiceFolder = '1pm7QaRFFK02ggjDUxqU4DfOZOt2ES9l_';
+var InvoiceFolder = '<google-drive-folder-id>';
 ```
 
 Google Drive folder ID where invoice sheet copies are stored. After the copy is created in `InvoiceFolder`, `createInvoiceSs` also places a shortcut to that file inside the customer's own Drive folder (`customers.folder`), so the document is reachable from both locations.

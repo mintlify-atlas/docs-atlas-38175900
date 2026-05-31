@@ -34,8 +34,8 @@ function onOpen(e) {
     .addItem("Sidebar", "showSidebar")
     .addItem("Update Current Tab", "updateCurrentTab")
     .addSeparator()
-    .addItem("GET Discounts", "getDiscounts")
-    .addItem("SAVE Discounts", "saveDiscounts")
+    .addItem("GET Discouts", "getDiscounts")
+    .addItem("SAVE Discouts", "saveDiscounts")
     .addToUi();
 
   if (e && e.authMode != ScriptApp.AuthMode.NONE) {
@@ -53,8 +53,8 @@ Even without the sidebar open, the **Arsinous** menu in the Google Sheets menu b
 | **Sidebar** | Opens the sidebar panel (`showSidebar()`) |
 | **Update Current Tab** | Refreshes the active sheet with fresh data from MySQL (`updateCurrentTab()`) |
 | *(separator)* | — |
-| **GET Discounts** | Pulls the discount table from MySQL into the Discounts sheet |
-| **SAVE Discounts** | Writes the Discounts sheet back to MySQL |
+| **GET Discouts** | Pulls the discount table from MySQL into the Discounts sheet |
+| **SAVE Discouts** | Writes the Discounts sheet back to MySQL |
 
 ## Sidebar Technology
 
@@ -137,7 +137,7 @@ function updateCurrentTab() {
   else if (shName == "Balance")     { showTransactions(); }
   else if (shName == "Discounts")   { getDiscounts(); }
   else {
-    throw('"Inventory", "Products", "Discounts", "Customers", "Invoices", "Balance", "All Balances" or "P&D" tabs can be updated only.');
+    throw('"Inventory", "Products", "Discounts", "Customers", "Invoices", "Balance", "All Balances"  or "P&D" tabs can be updated only.');
   }
 }
 ```

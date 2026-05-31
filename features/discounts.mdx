@@ -29,7 +29,7 @@ Columns A–H are read-only reference data from `products`. Columns I and J are 
 
 Enter the customer's ID in cell **H2**. The sheet automatically calls `getDiscounts()` via the `onEdit` trigger when cell **A1** is edited — but the most direct way is to use **Arsinous menu → GET Discounts** or the sidebar **Load Discounts** button.
 
-`getDiscounts(conn)` runs the following query, LEFT-joining each product against that customer's discount rows:
+`getDiscounts(conn)` clears `A5:M`, then immediately writes `"Updating...."` into cell A5 and calls `SpreadsheetApp.flush()` so the user sees a loading indicator before the query runs. It reads the customer ID from **H2**, executes the LEFT JOIN query, and writes results from row 5:
 
 ```javascript
 // Excerpt from Discounts.gs
@@ -38,6 +38,9 @@ function getDiscounts(conn) {
   var sh  = ss.getSheetByName("Discounts");
   sh.getRange("A5:M").clearContent();
   var customerId = sh.getRange("H2").getValue();
+  sh.getRange(5, 1).activate();
+  sh.getRange(5, 1).setValue("Updating....");
+  SpreadsheetApp.flush();
 
   conn = conn || Jdbc.getConnection(InstanceUrl, User, UserPwd);
   var results = conn.createStatement().executeQuery(
@@ -149,7 +152,7 @@ Both can be set simultaneously. The engine evaluates each independently and appl
 
 <CardGroup cols={2}>
   <Card title="Load Discounts" icon="download">
-    Enter customer ID in cell **H2**, then use **Arsinous menu → GET Discounts** or edit cell A1. The sheet is populated from row 5 with all products and any existing overrides for that customer.
+    Enter customer ID in cell **H2**, then use **Arsinous menu → GET Discounts** (or the sidebar Load button). Cell A5 shows `"Updating...."` while the query runs, then the sheet is populated from row 5 with all products and any existing overrides for that customer. Editing cell **A1** also triggers an automatic reload via the `onEdit` trigger.
   </Card>
   <Card title="Save Discounts" icon="floppy-disk">
     After editing columns I and J, use **Arsinous menu → SAVE Discounts** or the sidebar Save button. All existing discounts for the customer are replaced with the current sheet values.

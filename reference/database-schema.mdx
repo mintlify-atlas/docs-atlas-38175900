@@ -1,7 +1,7 @@
 ---
-title: "MySQL Database Schema for Arsinous V8 Sales"
+title: "Database Schema Reference — Arsinous V8 Sales MySQL"
 sidebarTitle: "Database Schema"
-description: "MySQL table structures inferred from the Arsinous V8 Sales Apps Script source, covering customers, products, invoices, inventory, payments, and discounts."
+description: "MySQL table structures inferred from the Arsinous V8 Sales Apps Script source, covering customers, products, invoices, inventory, and payments."
 ---
 
 The Arsinous V8 Sales application communicates with a MySQL database entirely through Google Apps Script's JDBC service. Because no DDL or migration files are included in the repository, the schema documented here is reconstructed from the `INSERT`, `UPDATE`, and `SELECT` statements spread across `DB/saveTo.gs`, `DB/getFrom.gs`, `invoice/backend.gs`, `Customer/backend.gs`, `product/backend.gs`, `Payment/backend.gs`, `Discounts.gs`, `Updates.gs`, and `SoA.gs`. Each table section lists every column that appears in at least one SQL statement, along with its inferred type and purpose.
