@@ -1,0 +1,159 @@
+---
+title: "Customer Script Functions Reference"
+sidebarTitle: "Customer Functions"
+description: "Apps Script functions for displaying, creating, editing, and syncing customers between Google Sheets and the MySQL customers table."
+---
+
+The customer module handles the full lifecycle of customer records inside Arsinous V8 Sales. It bridges the Google Sheets "Customers" tab and the MySQL `customers` table, providing modal dialogs for creating and editing customer data, a sync function that rewrites the sheet from the database on demand, and a shortcut to navigate directly to a customer's linked Google Drive folder. All write operations are ultimately routed through [`saveCustomerToDb`](/reference/db-functions#savecustomertodb) in the DB layer, which manages Drive folder creation for new customers and issues the correct INSERT or UPDATE statement.
+
+---
+
+## `showCustomer(customerData)`
+
+Opens a **600 × 650** modal dialog rendered from the `Customer/index` HTML template. The dialog title and loading state depend on whether a customer object is passed.
+
+- When called **without** `customerData`: uses `DefaultCustomer` as the template data, sets `loading: false`, and titles the dialog **"Add New Customer"**.
+- When called **with** `customerData`: passes the object as-is, sets `loading: true` (triggering an immediate DB fetch inside the dialog), and titles the dialog **"Edit Customer"** (because `customerData.id` is truthy).
+
+```javascript
+function showCustomer(customerData) {
+  var data = {
+    loading: true,
+    message: "Requesting data from Database...",
+    customer: customerData || DefaultCustomer,
+    snackbar: false,
+    snackbar_color: "error",
+    snackbar_text: null
+  };
+  var html = HtmlService.createTemplateFromFile("Customer/index");
+  data.loading = !!customerData ? true : false;
+  html.data = JSON.stringify(data);
+  html = html.evaluate();
+  html.addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, minimal-ui');
+  html.setWidth(600).setHeight(650);
+  var title = data.customer.id ? "Edit " : "Add New ";
+  SpreadsheetApp.getUi().showModalDialog(html, title + 'Customer');
+}
+```
+
+<ParamField path="customerData" type="Object" optional>
+  A partial customer object. When the `id` property is set (non-null), the dialog operates in **edit mode** and shows "Edit Customer" as the title. If omitted or `null`, the dialog opens in **create mode** with `DefaultCustomer` defaults. The full shape of the object mirrors the `customers` table columns: `id`, `code`, `name`, `address`, `municipality`, `city`, `zip`, `phone`, `details`, `folder`, `discounts`.
+</ParamField>
+
+<Note>
+  The `DefaultCustomer` constant (defined in `Constants.gs`) provides null values for all fields. The dialog's front-end replaces these with form inputs. Setting `loading: true` causes the dialog to immediately call back to `getItemsFromDB` to hydrate fields from the database before the user can interact with the form.
+</Note>
+
+---
+
+## `editCustomer()`
+
+Reads the currently selected row on the **Customers** sheet, builds a sparse customer object from the sheet's column headers, and delegates to `showCustomer(customerData)` in edit mode.
+
+**Validation rules (throws on failure):**
+1. Active sheet name must be `"Customers"`.
+2. Active cell row must be ≥ 2 (skips the header row).
+3. Column A value of the selected row must be non-empty (the customer `id`).
+
+If any rule fails, the function activates the Customers sheet and throws `'Select customer to edit from "Customers" tab'`.
+
+```javascript
+function editCustomer() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var row = sh.getActiveCell().getRow();
+  var id = sh.getRange(row, 1).getValue();
+  if (sh.getName() != "Customers" || row < 2 || id == "") {
+    var sh = ss.getSheetByName("Customers");
+    sh.activate();
+    throw('Select customer to edit from "Customers" tab');
+  }
+  var customerData = {};
+  var keys = sh.getDataRange().getDisplayValues()[0].filter(function(v){ return v != ""; });
+  keys.forEach(function(v){ customerData[v] = null; });
+  customerData.id = id;
+  showCustomer(customerData);
+}
+```
+
+The function reads **row 1** of the sheet's data range to obtain the column headers, filters out any blank trailing headers, and builds `customerData` with `null` for every column. It then sets `customerData.id` to the value found in column A of the selected row, which causes `showCustomer` to render the edit dialog with `loading: true`.
+
+<Note>
+  Only the `id` field is pre-populated before the dialog opens. All other customer fields are fetched from the database by the dialog's own initialization logic once it is rendered.
+</Note>
+
+---
+
+## `updateCustomers(conn)`
+
+Refreshes the **Customers** sheet by clearing its existing data and rewriting every row from a `SELECT * FROM customers` query. After writing the raw data, it replaces the second-to-last column with a Google Drive folder hyperlink formula for each customer.
+
+```javascript
+function updateCustomers(conn) {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName("Customers");
+  var keys = sh.getDataRange().getDisplayValues()[0];
+  sh.getRange("A2:M").clearContent();
+  // ...
+  conn = conn || Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.createStatement();
+  var results = stmt.executeQuery("SELECT * FROM customers");
+  // ...
+  var folderIndex = keys.indexOf("folder");
+  var formulas = products.map(function(v) {
+    return ['=hyperlink("https://drive.google.com/drive/folders/' + v[folderIndex] + '","Link to folder")'];
+  });
+  sh.getRange(2, lastCol - 1, formulas.length, 1).setFormulas(formulas);
+  sh.activate();
+  ss.toast('"Customers" tab is updated');
+}
+```
+
+**Column mapping:** The function reads the existing header row to determine the position of each column, then maps each `customers` result column to its matching sheet column by name. This means the sheet headers and the MySQL column names must match exactly.
+
+**Folder link:** After writing all data, a `=HYPERLINK(...)` formula pointing to `https://drive.google.com/drive/folders/<folder_id>` is injected into the column at position `lastCol - 1` (the second-to-last populated column) for every customer row.
+
+<ParamField path="conn" type="JdbcConnection" optional>
+  An already-open JDBC connection to reuse. If not provided, the function opens its own connection using the `InstanceUrl`, `User`, and `UserPwd` constants. The connection is always closed at the end of this function, so callers that pass an open connection should not rely on it remaining open afterward.
+</ParamField>
+
+<Warning>
+  `updateCustomers` calls `conn.close()` unconditionally after reading results. If you pass a shared connection (e.g., from `saveCustomerToDb`), that connection will be closed by the time this function returns. This is expected behavior in the save flow, as `updateCustomers` is the last step.
+</Warning>
+
+---
+
+## `navigateToCustomersFolder()`
+
+Opens the Google Drive folder associated with the selected customer in a new browser tab. It uses the same row-validation logic as `editCustomer` and then delegates to `navigateTo('folder', id)`.
+
+**Validation rules (throws on failure):**
+1. Active sheet name must be `"Customers"`.
+2. Active cell row must be ≥ 2.
+3. Column A value of the selected row must be non-empty.
+
+```javascript
+function navigateToCustomersFolder() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var row = sh.getActiveCell().getRow();
+  var id = sh.getRange(row, 1).getValue();
+  if (sh.getName() != "Customers" || row < 2 || id == "") {
+    var sh = ss.getSheetByName("Customers");
+    sh.activate();
+    throw('Select customer to edit from "Customers" tab');
+  }
+  var data = sh.getDataRange().getDisplayValues();
+  for (var i = 0; i < data[0].length; i++) {
+    if (data[0][i] == 'folder') { break; }
+  }
+  var id = data[row - 1][i];
+  navigateTo('folder', id);
+}
+```
+
+The function scans header row 1 for the column named `"folder"`, reads the folder ID from that column in the selected row, and passes it to `navigateTo`. The `navigateTo` helper (defined in `onOpen.gs`) renders a tiny redirect modal that calls `window.open(...)` with the Drive URL and then closes itself.
+
+<Note>
+  The variable `id` is shadowed inside the function: the first `id` is the customer record's primary key (from column A), and the second `id` (reassigned before calling `navigateTo`) is the Google Drive folder ID stored in the `folder` column. The Drive folder ID — not the customer database ID — is what gets passed to `navigateTo`.
+</Note>

@@ -1,72 +1,88 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "Arsinous V8 Sales",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
-  },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "primary": "#1A1A2E",
+    "light": "#4A90D9",
+    "dark": "#0D0D1A"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/arsinousltd-sudo/Arsinous-V8-Sales"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/arsinousltd-sudo/Arsinous-V8-Sales"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "setup",
+              "configuration"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/customers",
+              "features/products",
+              "features/invoices",
+              "features/inventory",
+              "features/payments",
+              "features/discounts"
+            ]
+          },
+          {
+            "group": "Financial Reports",
+            "pages": [
+              "reports/balance",
+              "reports/accounts-receivable",
+              "reports/all-balances"
+            ]
+          },
+          {
+            "group": "Sidebar & Navigation",
+            "pages": [
+              "sidebar/overview",
+              "sidebar/date-filters"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Script Functions",
+            "pages": [
+              "reference/customer-functions",
+              "reference/product-functions",
+              "reference/invoice-functions",
+              "reference/payment-functions",
+              "reference/discount-functions",
+              "reference/update-functions",
+              "reference/db-functions"
+            ]
+          },
+          {
+            "group": "Data Model",
+            "pages": [
+              "reference/database-schema",
+              "reference/constants"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

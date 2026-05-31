@@ -1,0 +1,174 @@
+---
+title: "Deploy Arsinous V8 Sales to Google Sheets"
+sidebarTitle: "Setup"
+description: "Step-by-step guide to deploying Arsinous V8 Sales into a Google Spreadsheet using the Apps Script editor and configuring your MySQL connection."
+---
+
+Deploying Arsinous V8 Sales means copying the project's source files into a Google Apps Script project attached to a Google Spreadsheet, wiring it to your MySQL database, and running `onOpen` once to grant the necessary permissions. The entire stack lives inside Google Workspace — no server deployment, no containers, no CI pipeline.
+
+## Prerequisites
+
+Before you begin, make sure you have the following in place:
+
+- **Google Workspace account** — Required for the full Apps Script feature set (sidebar, JDBC, Drive API).
+- **MySQL database** — Reachable on **port 3306** from Google's servers. Your database host must accept inbound connections from Google's IP ranges, or you must configure an appropriate network allowlist.
+- **Google Drive folder** — A Drive folder where new customer sub-folders will be created. Copy its folder ID from the URL (`https://drive.google.com/drive/folders/<FOLDER_ID>`).
+- **Invoice template spreadsheet** — A Google Sheets file used as the invoice template. Copy its file ID from the URL.
+- **Invoice output folder** — A second Drive folder where generated invoice spreadsheets will be saved.
+
+<Note>
+  The current `appsscript.json` in this repository sets `"runtimeVersion": "DEPRECATED_ES5"`. Before deploying, update this value to `"V8"` to enable the Chrome V8 engine and modern JavaScript syntax that the codebase is migrating toward. See Step 5 for the correct manifest content.
+</Note>
+
+---
+
+## Deployment Steps
+
+<Steps>
+
+  <Step title="Create a new Google Spreadsheet">
+    Go to [sheets.google.com](https://sheets.google.com) and create a blank spreadsheet. Give it a recognisable name such as **Arsinous V8 Sales**.
+
+    At this point the spreadsheet has one empty sheet. You will add the required tabs in Step 7.
+  </Step>
+
+  <Step title="Open the Apps Script editor">
+    From the spreadsheet, navigate to **Extensions → Apps Script**. This opens the script editor bound to your spreadsheet.
+
+    Delete the default empty `Code.gs` file that is created automatically — the Arsinous project uses its own file structure.
+  </Step>
+
+  <Step title="Copy all .gs script files">
+    Create each file in the Apps Script editor using **File → New → Script file**, then paste the contents of the corresponding source file.
+
+    The full list of script files to create, in order:
+
+    | File path in editor | Source file |
+    |---|---|
+    | `Constants` | `Constants.gs` |
+    | `onOpen` | `onOpen.gs` |
+    | `onEdit` | `onEdit.gs` |
+    | `Discounts` | `Discounts.gs` |
+    | `Formulas` | `Formulas.gs` |
+    | `SoA` | `SoA.gs` |
+    | `Updates` | `Updates.gs` |
+    | `Customer/backend` | `Customer/backend.gs` |
+    | `product/backend` | `product/backend.gs` |
+    | `invoice/backend` | `invoice/backend.gs` |
+    | `Payment/backend` | `Payment/backend.gs` |
+    | `sidebar/backend` | `sidebar/backend.gs` |
+    | `DB/getFrom` | `DB/getFrom.gs` |
+    | `DB/saveTo` | `DB/saveTo.gs` |
+
+    <Tip>
+      Apps Script does not have a native folder concept in the UI — file names like `Customer/backend` use a forward slash purely as a naming convention to reflect the source directory structure.
+    </Tip>
+  </Step>
+
+  <Step title="Copy all HTML files">
+    Create each HTML file using **File → New → HTML file**, then paste the corresponding source.
+
+    | File name in editor | Source file |
+    |---|---|
+    | `Customer/index` | `Customer/index.html` |
+    | `product/index` | `product/index.html` |
+    | `invoice/index` | `invoice/index.html` |
+    | `Payment/index` | `Payment/index.html` |
+    | `sidebar/index` | `sidebar/index.html` |
+
+    These files are served by `HtmlService.createHtmlOutputFromFile()` and render the Vue.js / Vuetify modal dialogs and sidebar.
+  </Step>
+
+  <Step title="Configure appsscript.json">
+    In the Apps Script editor, enable the manifest file view via **Project Settings → Show `appsscript.json` manifest file**. Replace the entire contents with:
+
+    ```json appsscript.json
+    {
+      "timeZone": "Europe/Paris",
+      "dependencies": {},
+      "exceptionLogging": "STACKDRIVER",
+      "runtimeVersion": "V8"
+    }
+    ```
+
+    **Key fields:**
+
+    | Field | Value | Notes |
+    |---|---|---|
+    | `timeZone` | `"Europe/Paris"` | Controls date formatting across all sheets. Change to match your locale if needed. |
+    | `exceptionLogging` | `"STACKDRIVER"` | Sends script errors to Google Cloud Logging for easier debugging. |
+    | `runtimeVersion` | `"V8"` | Enables the Chrome V8 JavaScript engine. The source repository currently ships `"DEPRECATED_ES5"` — this must be changed before use. |
+
+    <Note>
+      The repository's `appsscript.json` ships with `"runtimeVersion": "DEPRECATED_ES5"`. This is an in-progress V8 migration. Set the value to `"V8"` as shown above. If you encounter any compatibility issues after switching, check the [Apps Script V8 migration guide](https://developers.google.com/apps-script/guides/v8-runtime/migration) for syntax differences.
+    </Note>
+  </Step>
+
+  <Step title="Edit Constants.gs with your credentials">
+    Open the `Constants` file in the Apps Script editor and replace the placeholder values with your real configuration:
+
+    ```javascript Constants.gs
+    var User = '<mysql-username>';
+    var UserPwd = '<mysql-password>';
+    var InstanceUrl = 'jdbc:mysql://<db-host>:3306/<db-name>?useUnicode=yes&characterEncoding=UTF-8';
+
+    var CUSTOMERS_FOLDER = '<google-drive-folder-id>';
+    var InvoiceTemplate = '<google-sheets-template-file-id>';
+    var InvoiceFolder = '<google-drive-folder-id>';
+    ```
+
+    See the [Configuration reference](/configuration) for a full description of every constant.
+
+    <Warning>
+      Storing database credentials directly in `Constants.gs` means they are visible to anyone with edit access to the Apps Script project. For production deployments, move secrets into **Script Properties**: go to **Project Settings → Script Properties**, add keys (`DB_USER`, `DB_PASSWORD`, etc.), and read them at runtime with `PropertiesService.getScriptProperties().getProperty('DB_USER')`. This prevents credentials from appearing in source-controlled or shared code.
+    </Warning>
+  </Step>
+
+  <Step title="Create the required Google Sheets tabs">
+    Back in the spreadsheet, create nine tabs with exactly these names (spelling and capitalisation matter — the scripts reference them by name):
+
+    | Tab Name | Purpose |
+    |---|---|
+    | `Customers` | Customer list synced from MySQL |
+    | `Products` | Product catalog synced from MySQL |
+    | `Invoices` | Invoice list for the selected date range |
+    | `Inventory` | Stock levels with lots and expiry dates |
+    | `Discounts` | Per-customer product discounts |
+    | `Balance` | Statement of Account for one customer |
+    | `All Balances` | Outstanding balances for all customers |
+    | `P&D` | Payments & Deposits filtered view |
+    | `SoA Inputs` | Inputs for the Statement of Account query |
+
+    Rename the default `Sheet1` tab to `Customers`, then add the remaining eight tabs using the **+** button at the bottom of the spreadsheet.
+  </Step>
+
+  <Step title="Authorize and run onOpen for the first time">
+    In the Apps Script editor, select the `onOpen` function from the function dropdown at the top of the toolbar, then click **Run**.
+
+    Google will prompt you to review and grant the required OAuth permissions:
+
+    - **See, edit, create, and delete** your spreadsheets
+    - **Connect to an external service** (JDBC / MySQL)
+    - **See and manage files** in your Google Drive
+    - **Display and run** third-party web content in prompts and sidebars
+
+    After granting permissions, return to the spreadsheet and reload the page. The **Arsinous** menu should appear in the top menu bar and the sidebar should open automatically.
+
+    <Tip>
+      If the sidebar does not open automatically on the first load, click **Arsinous → Sidebar** in the menu. Subsequent opens will trigger the sidebar automatically via the `onOpen` trigger.
+    </Tip>
+  </Step>
+
+</Steps>
+
+---
+
+## Verifying the Installation
+
+Once `onOpen` has run successfully:
+
+1. The **Arsinous** menu is visible in the spreadsheet menu bar.
+2. The sidebar panel opens on the right side of the screen.
+3. Clicking **Arsinous → Update Current Tab** while on the `Customers` tab pulls customer records from MySQL and populates the sheet.
+
+If you see a JDBC connection error, double-check that your MySQL host is reachable on port 3306 and that the credentials in `Constants.gs` are correct.

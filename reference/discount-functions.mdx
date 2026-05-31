@@ -1,0 +1,113 @@
+---
+title: "Discount Script Functions Reference"
+sidebarTitle: "Discount Functions"
+description: "Apps Script functions for loading and saving per-customer product discounts from the MySQL discounts table into the Discounts sheet."
+---
+
+The discount module manages customer-specific pricing overrides. While every product carries default discount rules (`def_discount` and `def_fixed_discount`), the `discounts` table stores per-customer per-product overrides that the invoice dialog uses when calculating line-item prices. The **Discounts** sheet is a working grid: a user selects a customer (via the `H2` cell), loads all products with their default and custom discounts, edits the values in place, and then saves the changes back to MySQL. Both functions accept an optional connection so they can be chained from the `onEdit` trigger without opening redundant database connections.
+
+---
+
+## `getDiscounts(conn)`
+
+Clears the **Discounts** sheet from row 5 downward and rewrites it with every product's pricing and discount data for the customer currently identified in cell `H2`.
+
+```javascript
+function getDiscounts(conn) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName("Discounts");
+  sh.getRange("A5:M").clearContent();
+  var customerId = sh.getRange("H2").getValue();
+  var range = sh.getRange(5, 1);
+  range.activate();
+  range.setValue("Updating....");
+  SpreadsheetApp.flush();
+  conn = conn || Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.createStatement();
+  var results = stmt.executeQuery(
+    "SELECT products.id, products.code, products.name, products.cost, " +
+    "products.price, products.retail, products.def_discount, products.def_fixed_discount, " +
+    "customer_discounts.discount, customer_discounts.fixed_discount " +
+    "FROM products LEFT JOIN " +
+    "(SELECT * FROM discounts WHERE customer_id = " + customerId + ") AS customer_discounts " +
+    "ON products.id = customer_discounts.product_id;"
+  );
+  // writes results from row 5
+}
+```
+
+**Query:** A `LEFT JOIN` between `products` and a filtered subquery of `discounts` for `customer_id = <H2>`. Every product appears in the result regardless of whether a custom discount exists for the selected customer — the `discount` and `fixed_discount` columns will be `null` for products with no custom override.
+
+**Output columns (written starting at A5):**
+
+| Column | Source |
+|--------|--------|
+| A | `products.id` |
+| B | `products.code` |
+| C | `products.name` |
+| D | `products.cost` |
+| E | `products.price` |
+| F | `products.retail` |
+| G | `products.def_discount` |
+| H | `products.def_fixed_discount` |
+| I | `customer_discounts.discount` |
+| J | `customer_discounts.fixed_discount` |
+
+<ParamField path="conn" type="JdbcConnection" optional>
+  An already-open JDBC connection. If not provided, the function opens its own connection. The connection is always closed after reading results.
+</ParamField>
+
+<Note>
+  Before writing data, `getDiscounts` writes `"Updating...."` into cell `A5` and calls `SpreadsheetApp.flush()` to push that value to the visible sheet immediately. This gives users visual feedback during the database round-trip. The value is overwritten once data arrives.
+</Note>
+
+<Note>
+  `getDiscounts` is wired to the `onEdit` trigger: editing cell `A1` on the Discounts sheet automatically calls `getDiscounts()`. It is also available as a standalone menu item under **Arsinous → GET Discounts** and via **Update Current Tab** when the Discounts sheet is active.
+</Note>
+
+---
+
+## `saveDiscounts(conn)`
+
+Reads the discount grid from the Discounts sheet, deletes all existing discount rows for the selected customer, and batch-inserts the non-empty rows back into the `discounts` table.
+
+```javascript
+function saveDiscounts(conn) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName("Discounts");
+  var data = sh.getRange("A5:J").getValues();
+  var customerId = sh.getRange("H2").getValue();
+  data = data.filter(function(v) {
+    return (v[8] !== "" || v[9] !== "") && v[0] != "";
+  });
+  conn = conn || Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.createStatement();
+  stmt.executeUpdate("DELETE FROM discounts WHERE customer_id = " + customerId);
+  if (data.length > 0) {
+    var stmt = conn.prepareStatement(
+      'INSERT INTO discounts (product_id, customer_id, discount, fixed_discount) values (?, ?, ?, ?)'
+    );
+    for (var i = 0; i < data.length; i++) {
+      stmt.setString(1, data[i][0]); // product id (column A)
+      stmt.setString(2, customerId);
+      stmt.setString(3, data[i][8]); // discount (column I)
+      stmt.setString(4, Number(data[i][9])); // fixed_discount (column J)
+      stmt.addBatch();
+    }
+    stmt.executeBatch();
+  }
+  ss.toast('Discounts were saved succesfully');
+}
+```
+
+**Row filter:** Only rows where **at least one** of `discount` (column I) or `fixed_discount` (column J) is non-empty, **and** where the product `id` (column A) is set, are included in the batch INSERT. Blank rows or header-only rows are silently skipped.
+
+**Replace strategy:** The save is a full replace — `DELETE FROM discounts WHERE customer_id = <id>` runs first, removing all prior overrides for that customer, and then all qualifying rows are re-inserted. This means removing a discount override is done by clearing the value in the sheet and saving again.
+
+<ParamField path="conn" type="JdbcConnection" optional>
+  An already-open JDBC connection. If not provided, the function opens its own. The connection is **not** explicitly closed in this function — callers that pass a connection remain responsible for closing it.
+</ParamField>
+
+<Warning>
+  The delete-then-insert approach means that if `executeBatch()` fails after the `DELETE` has run, all discount overrides for that customer will be lost. There is no explicit transaction wrapping in `saveDiscounts`, so no rollback occurs on failure. Ensure the sheet data is correct before saving.
+</Warning>

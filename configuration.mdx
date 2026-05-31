@@ -1,0 +1,224 @@
+---
+title: "Configure Database Credentials and Drive Settings"
+sidebarTitle: "Configuration"
+description: "Configure Arsinous V8 Sales by editing Constants.gs — set MySQL connection details, Google Drive folder IDs, invoice template ID, and VAT codes."
+---
+
+All runtime configuration for Arsinous V8 Sales lives in a single file: `Constants.gs`. It declares the MySQL connection details, the Google Drive folder IDs used for customer and invoice file management, the default object shapes used when creating new records, and the VAT rate lookup table. Editing this file is the first thing you do after copying the project files into your Apps Script editor.
+
+## Full Constants.gs Reference
+
+```javascript Constants.gs
+var User = '<mysql-username>';
+var UserPwd = '<mysql-password>';
+var InstanceUrl = 'jdbc:mysql://<db-host>:3306/<db-name>?useUnicode=yes&characterEncoding=UTF-8';
+
+var CUSTOMERS_FOLDER = '<google-drive-folder-id>';
+var InvoiceTemplate = '<google-sheets-template-file-id>';
+var InvoiceFolder = '<google-drive-folder-id>';
+
+var DefaultCustomer = {
+  id: null,
+  code: null,
+  name: null,
+  address: null,
+  municipality: null,
+  city: null,
+  zip: null,
+  phone: null,
+  details: null,
+  folder: null,
+  discounts: null
+};
+
+var DefaultProduct = {
+  code: null,
+  name: null,
+  cat: null,
+  vat_code: 3,
+  price: 0,
+  retail: 0,
+  def_discount: "6+2,12+6",
+  def_fixed_discount: "20"
+};
+
+var Vat = {
+  "1": { code: "1", value: 0,    name: "0%"  },
+  "2": { code: "2", value: 0.05, name: "5%"  },
+  "3": { code: "3", value: 0.19, name: "19%" }
+};
+```
+
+<Warning>
+  Storing credentials directly in `Constants.gs` exposes them to anyone with edit access to the Apps Script project and risks them being committed to version control. For production deployments, use **Script Properties** instead: add your secrets via **Project Settings → Script Properties** in the Apps Script editor, then retrieve them at runtime with `PropertiesService.getScriptProperties().getProperty('DB_USER')`. This keeps credentials out of source files entirely.
+</Warning>
+
+---
+
+## Database Connection
+
+### `User`
+
+<ParamField path="User" type="string" required>
+  The MySQL username used to authenticate the JDBC connection. This user must have `SELECT`, `INSERT`, `UPDATE`, and `DELETE` privileges on the target database.
+
+  ```javascript
+  var User = 'my_db_user';
+  ```
+</ParamField>
+
+### `UserPwd`
+
+<ParamField path="UserPwd" type="string" required>
+  The password for the MySQL user specified in `User`.
+
+  ```javascript
+  var UserPwd = 'my_db_password';
+  ```
+</ParamField>
+
+### `InstanceUrl`
+
+<ParamField path="InstanceUrl" type="string" required>
+  The full JDBC connection string passed to `Jdbc.getConnection()`. It must follow the format below exactly, replacing the host and database name placeholders.
+
+  ```javascript
+  var InstanceUrl = 'jdbc:mysql://<db-host>:3306/<db-name>?useUnicode=yes&characterEncoding=UTF-8';
+  ```
+
+  | Segment | Description |
+  |---|---|
+  | `<db-host>` | The public IP address or hostname of your MySQL server (e.g., `142.93.99.189`) |
+  | `3306` | The standard MySQL port — must be open and reachable from Google's servers |
+  | `<db-name>` | The name of the target database |
+  | `useUnicode=yes&characterEncoding=UTF-8` | Ensures correct handling of accented characters and special symbols in customer names and product descriptions |
+</ParamField>
+
+<Note>
+  Google's JDBC service connects outbound from Google's infrastructure to your MySQL server on port **3306**. Your database host must accept connections from Google's IP ranges. If your MySQL server sits behind a firewall, add the appropriate allowlist entries or use a publicly reachable endpoint. Private network databases (e.g., within a VPC with no public IP) will not be reachable without additional networking configuration such as a Cloud SQL Auth Proxy or an SSH tunnel.
+</Note>
+
+---
+
+## Google Drive Settings
+
+### `CUSTOMERS_FOLDER`
+
+<ParamField path="CUSTOMERS_FOLDER" type="string" required>
+  The Google Drive folder ID of the parent folder where new customer sub-folders are automatically created. When a new customer is saved through the Customer dialog, the system creates a named sub-folder inside this parent and stores the resulting folder ID on the customer record.
+
+  ```javascript
+  var CUSTOMERS_FOLDER = '1NWoRdqhx9QMLQYXHLd0rs5yxy5C1--Og';
+  ```
+
+  Find the folder ID in the Drive URL: `https://drive.google.com/drive/folders/<FOLDER_ID>`
+</ParamField>
+
+### `InvoiceTemplate`
+
+<ParamField path="InvoiceTemplate" type="string" required>
+  The Google Sheets **file ID** of the spreadsheet used as the invoice template. When a new invoice is generated, this template is copied, populated with invoice data, and saved to `InvoiceFolder`.
+
+  ```javascript
+  var InvoiceTemplate = '14JRcFm2XRjBSkr7epRI1tNJrG081IMegHQycWLeu0VI';
+  ```
+
+  Find the file ID in the Sheets URL: `https://docs.google.com/spreadsheets/d/<FILE_ID>/edit`
+</ParamField>
+
+### `InvoiceFolder`
+
+<ParamField path="InvoiceFolder" type="string" required>
+  The Google Drive folder ID where generated invoice spreadsheets are stored. Each newly created invoice is placed here as a copy of the `InvoiceTemplate`.
+
+  ```javascript
+  var InvoiceFolder = '1pm7QaRFFK02ggjDUxqU4DfOZOt2ES9l_';
+  ```
+
+  Find the folder ID in the Drive URL: `https://drive.google.com/drive/folders/<FOLDER_ID>`
+</ParamField>
+
+---
+
+## Default Object Shapes
+
+These objects define the structure of a blank new record. They are used by the frontend dialogs as the starting state before a user fills in a form. Do not remove any keys — the dialog components expect all fields to be present, even when `null`.
+
+### `DefaultCustomer`
+
+A new customer record before any fields are filled in:
+
+```javascript
+var DefaultCustomer = {
+  id: null,           // MySQL auto-increment primary key (set on save)
+  code: null,         // Short customer code / reference
+  name: null,         // Full customer name
+  address: null,      // Street address
+  municipality: null, // Municipality or district
+  city: null,         // City
+  zip: null,          // Postal / ZIP code
+  phone: null,        // Phone number
+  details: null,      // Free-text notes
+  folder: null,       // Google Drive folder ID (populated on first save)
+  discounts: null     // Discount rule set (populated from Discounts table)
+};
+```
+
+### `DefaultProduct`
+
+A new product record with sensible defaults pre-applied:
+
+```javascript
+var DefaultProduct = {
+  code: null,                  // Product SKU / code
+  name: null,                  // Product name
+  cat: null,                   // Category
+  vat_code: 3,                 // Default VAT code — 19% (see VAT Codes below)
+  price: 0,                    // Wholesale price
+  retail: 0,                   // Retail price
+  def_discount: "6+2,12+6",   // Default tiered discount string
+  def_fixed_discount: "20"    // Default fixed percentage discount
+};
+```
+
+The `def_discount` field uses a comma-separated list of quantity+bonus expressions (e.g., `"6+2"` means buy 6, get 2 free). The `def_fixed_discount` is a percentage applied as a flat discount.
+
+---
+
+## VAT Codes
+
+The `Vat` object maps numeric VAT codes (stored in MySQL and product records) to their rate values. All invoice and pricing calculations reference this lookup to compute tax amounts.
+
+```javascript
+var Vat = {
+  "1": { code: "1", value: 0,    name: "0%"  },
+  "2": { code: "2", value: 0.05, name: "5%"  },
+  "3": { code: "3", value: 0.19, name: "19%" }
+};
+```
+
+| Code | `value` | Display name | Typical use |
+|---|---|---|---|
+| `"1"` | `0` | `0%` | Zero-rated or VAT-exempt goods |
+| `"2"` | `0.05` | `5%` | Reduced VAT rate (e.g., food, books) |
+| `"3"` | `0.19` | `19%` | Standard VAT rate |
+
+<ParamField path="Vat[code].code" type="string">
+  The string key used to reference this VAT entry throughout the system (stored in the `vat_code` column in MySQL).
+</ParamField>
+
+<ParamField path="Vat[code].value" type="number">
+  The decimal multiplier applied to a line-item total to compute the VAT amount (e.g., `0.19` for 19%).
+</ParamField>
+
+<ParamField path="Vat[code].name" type="string">
+  The human-readable label displayed in product forms and invoice dialogs.
+</ParamField>
+
+<Note>
+  The default VAT code for new products (`DefaultProduct.vat_code`) is `3`, corresponding to the standard 19% rate. Change this default in `Constants.gs` if your product catalog primarily uses a different rate.
+</Note>
+
+<Tip>
+  To add a new VAT rate (e.g., a 10% reduced rate), append a new entry to the `Vat` object with a unique string key, update the MySQL schema to allow the new code value, and update any product creation forms that hard-code the available options.
+</Tip>

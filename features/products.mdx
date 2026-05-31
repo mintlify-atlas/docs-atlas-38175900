@@ -1,0 +1,192 @@
+---
+title: "Manage Products and Pricing in Arsinous V8 Sales"
+sidebarTitle: "Products"
+description: "Maintain your product catalog with VAT codes, cost, list price, retail price, and default discount rules. Sync from MySQL with one click."
+---
+
+The Products module keeps your full catalog — pricing tiers, VAT classifications, and default discount structures — in sync between MySQL and the **Products** sheet. Every invoice line item draws from this catalog, inheriting the product's cost, wholesale price, and discount rules unless an invoice- or customer-level override is in place. Getting your product data right here saves time across every document you create downstream.
+
+## The Products Sheet
+
+Each row in the Products sheet represents one product record from the MySQL `products` table. After a sync, column K is stamped with an **Updated:** timestamp so you always know when the data was last refreshed.
+
+| Column | MySQL field | Type | Description |
+|--------|-------------|------|-------------|
+| A | `id` | integer | Auto-increment primary key |
+| B | `code` | string | Short product code |
+| C | `name` | string | Full product description |
+| D | `cat` | string | Category |
+| E | `vat_code` | integer | VAT code (1, 2, or 3) |
+| F | `cost` | decimal | Default cost price (€) |
+| G | `price` | decimal | Wholesale / list price (€) |
+| H | `retail` | decimal | Retail price (€) |
+| I | `def_discount` | string | Default quantity-break discount rule |
+| J | `def_fixed_discount` | string | Default flat discount percentage |
+| K | *(generated)* | — | "Updated:" label |
+| L | *(generated)* | — | Sync timestamp |
+
+## VAT Codes
+
+VAT rates are defined in the `Vat` constant in `Constants.gs` and are used throughout the invoice calculation engine:
+
+| Code | Rate | Description |
+|------|------|-------------|
+| `1` | 0 % | Zero-rated / exempt |
+| `2` | 5 % | Reduced rate |
+| `3` | 19 % | Standard rate (default for new products) |
+
+```javascript
+// Constants.gs
+var Vat = {
+  "1": { code: "1", value: 0,    name: "0%"  },
+  "2": { code: "2", value: 0.05, name: "5%"  },
+  "3": { code: "3", value: 0.19, name: "19%" }
+};
+```
+
+## Syncing Products from MySQL
+
+`updateProducts(conn)` refreshes the Products sheet from the `products` table:
+
+1. Reads the header row to build the column key list.
+2. Clears `A2:M` (preserving headers).
+3. Executes `SELECT * FROM products` over JDBC.
+4. Maps each result column to the matching sheet column by header name.
+5. Writes all rows in a single `setValues` call.
+6. Stamps the **Updated:** timestamp into cells K1:L1.
+
+```javascript
+// Excerpt from product/backend.gs
+function updateProducts(conn) {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName("Products");
+  var keys = sh.getDataRange().getDisplayValues().splice(0, 1)[0];
+  sh.getRange("A2:M").clearContent();
+  conn = conn || Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.createStatement();
+  var results = stmt.executeQuery("SELECT * FROM products");
+  var numCols = results.getMetaData().getColumnCount();
+  var products = [];
+
+  while (results.next()) {
+    var product = keys.map(function(v) { return ""; });
+    for (var col = 0; col < numCols; col++) {
+      var header = results.getMetaData().getColumnName(col + 1);
+      var index = keys.indexOf(header);
+      if (index > -1) {
+        product[index] = results.getString(col + 1);
+      }
+    }
+    products.push(product.slice());
+  }
+  results.close();
+  conn.close();
+
+  if (products.length > 0) {
+    sh.getRange(2, 1, products.length, keys.length).setValues(products);
+  }
+  sh.getRange(1, 11, 1, 2).setValues([["Updated:", new Date()]]);
+  ss.toast('"Products" tab is updated');
+}
+```
+
+Trigger a sync via **Arsinous menu → Update Current Tab** while the Products sheet is active, or use the sidebar **Refresh** button.
+
+## Adding a New Product
+
+Open the Add Product dialog from **Arsinous menu → Add Product** or the sidebar **Add** button. This calls `showProduct(null)`, which opens a 600 × 600 px Vuetify modal pre-filled with `DefaultProduct` defaults:
+
+```javascript
+// Constants.gs
+var DefaultProduct = {
+  code: null,
+  name: null,
+  cat: null,
+  vat_code: 3,       // Standard 19% VAT
+  price: 0,
+  retail: 0,
+  def_discount: "6+2,12+6",
+  def_fixed_discount: "20"
+};
+```
+
+Fill in the fields and click **Save**. The dialog calls `saveProductToDb(data)`, which executes an `INSERT INTO products` statement.
+
+## Editing an Existing Product
+
+Products can be edited from both the **Products** sheet and the **Inventory** sheet:
+
+1. Click any cell in the product's row on either sheet.
+2. Choose **Arsinous menu → Edit Product**. This calls `editProduct()`.
+3. `editProduct()` validates that the active sheet is `Products` or `Inventory`, reads the header row (skipping the title row via `splice(1,1)`), builds a `productData` object keyed by column header, and calls `showProduct(productData)`.
+4. The modal opens in edit mode, fetches the full record from MySQL via `getProductFromDB(id)`, and populates all fields.
+5. Make your changes and click **Save**. `saveProductToDb(data)` runs an `UPDATE products SET ...` statement.
+
+```javascript
+// Excerpt from product/backend.gs
+function editProduct() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var row = sh.getActiveCell().getRow();
+  var id = sh.getRange(row, 1).getValue();
+  if ((sh.getName() != "Products" && sh.getName() != "Inventory") || row < 2 || id == "") {
+    throw('Select product to edit from "Products" or "Inventory" tab');
+  }
+  var productData = {};
+  var keys = sh.getDataRange().getDisplayValues().splice(1, 1)[0]
+               .filter(function(v) { return v != ""; });
+  keys.forEach(function(v) { productData[v] = null; });
+  productData.id = id;
+  showProduct(productData);
+}
+```
+
+## Product Fields Reference
+
+<ParamField body="code" type="string">
+  Short product identifier shown on invoice line items and reports.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  Full product description. Displayed in invoice autocomplete and the inventory grid.
+</ParamField>
+
+<ParamField body="cat" type="string">
+  Category label for grouping and filtering products.
+</ParamField>
+
+<ParamField body="vat_code" type="integer" default="3">
+  VAT classification: `1` = 0%, `2` = 5%, `3` = 19%. The VAT rate is applied per line item when calculating invoice totals.
+</ParamField>
+
+<ParamField body="cost" type="decimal">
+  Default cost price in euros. Used as a fallback when no lot-level `final_cost` is available for invoice cost tracking.
+</ParamField>
+
+<ParamField body="price" type="decimal" default="0">
+  Wholesale / list price in euros. This is the default unit price populated when the product is added to an invoice.
+</ParamField>
+
+<ParamField body="retail" type="decimal" default="0">
+  Retail price in euros. Written into the invoice spreadsheet for reference; not used in totals calculations.
+</ParamField>
+
+<ParamField body="def_discount" type="string" default="6+2,12+6">
+  Default quantity-break discount rule for this product. Applied to all customers unless overridden at the customer or invoice level. See the format note below.
+</ParamField>
+
+<ParamField body="def_fixed_discount" type="string" default="20">
+  Default flat discount percentage. Applied as a fallback when no quantity-break rule matches, unless overridden per customer.
+</ParamField>
+
+## Default Discount Format
+
+<Tip>
+  The `def_discount` field uses a comma-separated list of quantity-break rules in the format `buy+free`. For example:
+
+  - `"6+2"` — buy 6 units, get 2 free (equivalent to a ~25% discount on those 8 units)
+  - `"12+6"` — buy 12 units, get 6 free (equivalent to a ~33% discount on those 18 units)
+  - `"6+2,12+6"` — two tiers: the system evaluates both and applies the one that gives the **largest absolute discount amount**
+
+  The invoice engine parses this string at calculation time, so you can update `def_discount` at any time and the change takes effect on the next invoice without any code changes.
+</Tip>

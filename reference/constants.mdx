@@ -1,0 +1,185 @@
+---
+title: "Constants and Default Values Reference"
+sidebarTitle: "Constants"
+description: "All global constants defined in Constants.gs — database connection variables, Google Drive IDs, default object shapes, and VAT code definitions."
+---
+
+`Constants.gs` is the single source of truth for every value that is shared across the Arsinous V8 Sales Apps Script project. Because Apps Script loads all `.gs` files into the same global scope before execution, every `var` declared here is directly accessible from `invoice/backend.gs`, `Customer/backend.gs`, `product/backend.gs`, `Payment/backend.gs`, `Discounts.gs`, `Updates.gs`, `SoA.gs`, and the JDBC helper files in `DB/`. No import or require statement is needed — if it is declared in `Constants.gs`, it is available everywhere.
+
+<Warning>
+  `User`, `UserPwd`, and `InstanceUrl` contain MySQL credentials stored in plain text inside the script source. Anyone with read access to the Apps Script project can see the database password. For a production deployment, remove these hard-coded values and read them at runtime using `PropertiesService.getScriptProperties().getProperty('DB_USER')` (and equivalent keys for `DB_PASSWORD` and `DB_URL`). Script properties are encrypted at rest and are not visible to collaborators who can only view the script.
+</Warning>
+
+---
+
+## Connection Variables
+
+These three variables are passed to every `Jdbc.getConnection()` call throughout the project.
+
+### `User`
+
+```javascript
+var User = 'kpwzwvpsby';
+```
+
+MySQL username used to authenticate all JDBC connections.
+
+---
+
+### `UserPwd`
+
+```javascript
+var UserPwd = '2pWmMGuC7h';
+```
+
+MySQL password corresponding to `User`.
+
+---
+
+### `InstanceUrl`
+
+```javascript
+var InstanceUrl = 'jdbc:mysql://142.93.99.189:3306/kpwzwvpsby?useUnicode=yes&characterEncoding=UTF-8';
+// Pattern: 'jdbc:mysql://<public DB address>:3306/<DB NAME>'
+```
+
+Full JDBC connection URL. The query-string parameters have specific purposes:
+
+| Parameter | Value | Purpose |
+|---|---|---|
+| `useUnicode` | `yes` | Instructs the MySQL JDBC driver to use Unicode for all string operations. |
+| `characterEncoding` | `UTF-8` | Ensures that accented characters in customer names, addresses, and product descriptions survive the round-trip between Apps Script and MySQL without corruption. |
+
+---
+
+## Google Drive / Sheets IDs
+
+<Note>
+  You can find a Google Drive folder ID in the folder's URL: `https://drive.google.com/drive/folders/<FOLDER_ID>`. A Google Sheets file ID appears in its URL as `https://docs.google.com/spreadsheets/d/<FILE_ID>`. Copy only the alphanumeric segment — not any trailing `/edit` or `?usp=sharing` portion.
+</Note>
+
+### `CUSTOMERS_FOLDER`
+
+```javascript
+var CUSTOMERS_FOLDER = "1NWoRdqhx9QMLQYXHLd0rs5yxy5C1--Og";
+```
+
+Google Drive folder ID of the top-level customers directory. When a new customer is created without a pre-existing `folder` value, `saveCustomerToDb` calls `DriveApp.getFolderById(CUSTOMERS_FOLDER).createFolder(data.name)` and stores the resulting sub-folder ID in `customers.folder`. Replace this value with the ID of your own Drive folder.
+
+---
+
+### `InvoiceTemplate`
+
+```javascript
+var InvoiceTemplate = "14JRcFm2XRjBSkr7epRI1tNJrG081IMegHQycWLeu0VI";
+```
+
+Google Sheets file ID of the master invoice template. `createInvoiceSs` calls `DriveApp.getFileById(InvoiceTemplate).makeCopy(...)` to produce a new invoice sheet for each document. The copy is named with the zero-padded invoice ID (e.g. `"000042"`). The template must contain a sheet tab named `"Invoice"` with the cell layout that `updateInvoiceSs` writes into.
+
+---
+
+### `InvoiceFolder`
+
+```javascript
+var InvoiceFolder = '1pm7QaRFFK02ggjDUxqU4DfOZOt2ES9l_';
+```
+
+Google Drive folder ID where invoice sheet copies are stored. After the copy is created in `InvoiceFolder`, `createInvoiceSs` also places a shortcut to that file inside the customer's own Drive folder (`customers.folder`), so the document is reachable from both locations.
+
+---
+
+## Default Object Shapes
+
+The two `Default*` objects define the initial state that is passed to the HTML modal dialogs when creating a new record. They guarantee that every field the form expects is present on the data object, even before the user has typed anything.
+
+### `DefaultCustomer`
+
+Passed to `showCustomer()` when no existing customer is selected. All fields are `null` to produce empty form inputs.
+
+```javascript
+var DefaultCustomer = {
+  id: null,
+  code: null,
+  name: null,
+  address: null,
+  municipality: null,
+  city: null,
+  zip: null,
+  phone: null,
+  details: null,
+  folder: null,
+  discounts: null
+};
+```
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | `null` \| `number` | `null` for a new customer; set by the DB on insert. |
+| `code` | `null` \| `string` | Short identifier displayed on invoice headers. |
+| `name` | `null` \| `string` | Customer full name. Also used as the Google Drive sub-folder name on creation. |
+| `address` | `null` \| `string` | Street address. |
+| `municipality` | `null` \| `string` | Municipality or district. |
+| `city` | `null` \| `string` | City. |
+| `zip` | `null` \| `string` | Postal / ZIP code. |
+| `phone` | `null` \| `string` | Contact phone number. |
+| `details` | `null` \| `string` | Freeform text printed in the invoice header block (cell `J1` of the invoice sheet). |
+| `folder` | `null` \| `string` | Google Drive folder ID. If `null` when saved, a new folder is auto-created under `CUSTOMERS_FOLDER`. |
+| `discounts` | `null` \| `object` | Customer-specific discount overrides; populated from the `discounts` table at load time. |
+
+---
+
+### `DefaultProduct`
+
+Passed to `showProduct()` when no existing product is selected. Unlike `DefaultCustomer`, several fields carry non-null defaults that reflect common business settings.
+
+```javascript
+var DefaultProduct = {
+  code: null,
+  name: null,
+  cat: null,
+  vat_code: 3,             // defaults to 19% VAT
+  price: 0,
+  retail: 0,
+  def_discount: "6+2,12+6",  // buy 6 get 2 free, buy 12 get 6 free
+  def_fixed_discount: "20"   // 20% flat discount
+};
+```
+
+| Property | Type | Default | Description |
+|---|---|---|---|
+| `code` | `null` \| `string` | `null` | Product SKU or short code. |
+| `name` | `null` \| `string` | `null` | Display name. |
+| `cat` | `null` \| `string` | `null` | Product category. |
+| `vat_code` | `number` | `3` | VAT rate identifier. `3` maps to 19 % (standard rate). Change to `1` or `2` for zero-rated or reduced-rate products. |
+| `price` | `number` | `0` | Standard selling price. |
+| `retail` | `number` | `0` | Retail reference price, shown on the invoice sheet for comparison. |
+| `def_discount` | `string` | `"6+2,12+6"` | Default quantity-break discount pattern. The format is `<threshold>+<free>,<threshold>+<free>`. `"6+2"` means: buy 6, get 2 free. Multiple tiers are comma-separated. |
+| `def_fixed_discount` | `string` | `"20"` | Default flat discount percentage (20 %) applied before quantity-break discounts. Stored as a string but converted to `Number` on save. |
+
+---
+
+## `Vat`
+
+A lookup table that maps a small integer code to a VAT rate object. Products store only the `vat_code` integer in MySQL; the full rate details are resolved at runtime from this object. The `value` field is the decimal multiplier (e.g. `0.19` for 19 %) used in VAT amount calculations.
+
+```javascript
+var Vat = {
+  "1": { code: "1", value: 0,    name: "0%"  },
+  "2": { code: "2", value: 0.05, name: "5%"  },
+  "3": { code: "3", value: 0.19, name: "19%" }
+};
+```
+
+| Code | `value` | Display Name | Description |
+|---|---|---|---|
+| `1` | `0` (0%) | `0%` | Zero-rated / exempt. Used for goods that carry no VAT obligation. |
+| `2` | `0.05` (5%) | `5%` | Reduced rate. |
+| `3` | `0.19` (19%) | `19%` | Standard rate. This is the default for new products (`DefaultProduct.vat_code = 3`). |
+
+To resolve a VAT rate from a product object at runtime:
+
+```javascript
+var product = JSON.parse(getProductFromDB(id));
+var vatRate  = Vat[product.vat_code];       // e.g. { code: "3", value: 0.19, name: "19%" }
+var vatAmount = lineTotal * vatRate.value;  // e.g. 100 * 0.19 = 19
+```

@@ -1,0 +1,191 @@
+---
+title: "Arsinous Sidebar: Quick Actions and Tab Navigation"
+sidebarTitle: "Overview"
+description: "The Arsinous sidebar provides one-click access to all core actions — refresh tabs, create records, manage invoices — without leaving Google Sheets."
+---
+
+The Arsinous sidebar is your central control panel inside Google Sheets. Rather than hunting through menus or manually triggering scripts, the sidebar puts every frequently used action — from refreshing the Inventory tab to creating an invoice or logging a payment — a single click away. It opens as a 300 px-wide panel docked to the right edge of the spreadsheet, stays visible while you work, and communicates with the backend over `google.script.run` so responses surface as toast notifications without interrupting your workflow.
+
+## Opening the Sidebar
+
+The sidebar is rendered by `showSidebar()`, which builds the panel from `sidebar/index.html` using Google Apps Script's `HtmlService`:
+
+```javascript
+function showSidebar() {
+  var html = HtmlService.createHtmlOutputFromFile('sidebar/index')
+    .setTitle('Arsinous')
+    .setWidth(300);
+  SpreadsheetApp.getUi().showSidebar(html);
+}
+```
+
+You can open it at any time from the **Arsinous** menu → **Sidebar**, or by triggering **Update Current Tab** which also surfaces sidebar functionality for the active sheet.
+
+<Note>
+  The sidebar opens **automatically on spreadsheet load**, but only after the user has granted script authorization. On the very first open — before authorization is complete — `onOpen` runs in a restricted auth mode and skips `showSidebar()`. Once you have authorized the script, the sidebar will appear every time the spreadsheet is opened.
+</Note>
+
+The `onOpen` trigger checks the auth mode before calling `showSidebar()`:
+
+```javascript
+function onOpen(e) {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu("Arsinous")
+    .addItem("Sidebar", "showSidebar")
+    .addItem("Update Current Tab", "updateCurrentTab")
+    .addSeparator()
+    .addItem("GET Discounts", "getDiscounts")
+    .addItem("SAVE Discounts", "saveDiscounts")
+    .addToUi();
+
+  if (e && e.authMode != ScriptApp.AuthMode.NONE) {
+    showSidebar();
+  }
+}
+```
+
+## The Arsinous Menu
+
+Even without the sidebar open, the **Arsinous** menu in the Google Sheets menu bar gives access to the most common actions:
+
+| Menu Item | Action |
+|---|---|
+| **Sidebar** | Opens the sidebar panel (`showSidebar()`) |
+| **Update Current Tab** | Refreshes the active sheet with fresh data from MySQL (`updateCurrentTab()`) |
+| *(separator)* | — |
+| **GET Discounts** | Pulls the discount table from MySQL into the Discounts sheet |
+| **SAVE Discounts** | Writes the Discounts sheet back to MySQL |
+
+## Sidebar Technology
+
+The sidebar UI is built with **Vue.js 2** and the **Buefy** component library (a Vue wrapper around Bulma CSS). Both are loaded from CDN:
+
+```html
+<link rel="stylesheet" href="https://unpkg.com/buefy@0.8.9/dist/buefy.min.css">
+<script src="https://unpkg.com/vue@2.6.11/dist/vue.js"></script>
+<script src="https://unpkg.com/buefy@0.8.9/dist/buefy.min.js"></script>
+```
+
+On mount, the Vue instance immediately calls `readProperties()` on the server to restore the user's last-saved date filter settings and inventory preferences, so the sidebar always reflects the user's previous session state.
+
+## Sidebar Sections
+
+The sidebar is organized into five functional sections, each rendered as a Buefy tile card:
+
+<CardGroup cols={2}>
+  <Card title="Date Controls" icon="calendar">
+    Time period selector, From/To date pickers, and the **Refresh current tab** button that applies the chosen date range to the active sheet.
+  </Card>
+  <Card title="Inventory" icon="box">
+    Refresh the Inventory tab, toggle **Hide Empty** (products with no stock), and sort by **Id** or **Name**.
+  </Card>
+  <Card title="Customers" icon="users">
+    Refresh the Customers tab, pull discount data, and save discount changes back to the database.
+  </Card>
+  <Card title="Invoices & Notes" icon="file-invoice">
+    Create, edit, or delete an **Invoice** or **Credit Note**. Edit/Delete actions read the row selected in the Invoices or Balance sheet.
+  </Card>
+  <Card title="Payments" icon="credit-card">
+    Create, edit, or delete a **Payment** record for the selected customer.
+  </Card>
+  <Card title="Transactions" icon="list">
+    Show all transactions for the customer named in cell A1 of the Balance sheet.
+  </Card>
+</CardGroup>
+
+### Section reference
+
+| Section | Button / Control | Backend function called |
+|---|---|---|
+| **Date Controls** | Time Period `<b-select>` | Saves via `updateProperty('timePeriod', …)` (watcher) |
+| | From datepicker | Saves via `updateProperty('startDate', …)` (watcher); enabled only when period = `custom` |
+| | To datepicker | Saves via `updateProperty('endDate', …)` (watcher); enabled only when period = `custom` |
+| | Refresh current tab | `refreshAllProperties()` → `updateCurrentTab()` |
+| **Inventory** | Refresh Inventory | `updateInventory(hideEmpty, orderCol)` |
+| | Hide Empty checkbox | Saves via `updateProperty('hideEmpty', …)` (watcher) |
+| | Sort by (Id / Name) | Saves via `updateProperty('orderCol', …)` (watcher) |
+| **Customers** | Update Customers | `updateCustomers()` |
+| | Get Discounts | `getDiscounts()` |
+| | Save Discounts | `saveDiscounts()` |
+| **Invoices** | Create | `showInvoice(null, 'invoice')` |
+| | Edit | `editInvoiceOrNote('invoice')` |
+| | Delete | `deleteInvoiceOrNote('invoice')` |
+| **Notes** | Create | `showInvoice(null, 'credit note')` |
+| | Edit | `editInvoiceOrNote('credit note')` |
+| | Delete | `deleteInvoiceOrNote('credit note')` |
+| **Payments** | Create | `showPayment()` |
+| | Edit | `selectPaymentToEdit()` |
+| | Delete | `selectPaymentToDelete()` |
+| **Transactions** | Show Transactions | `showTransactions()` |
+
+## `updateCurrentTab()`
+
+The **Refresh current tab** button (and the menu item of the same name) route to the correct update function based on whichever sheet is currently active:
+
+```javascript
+function updateCurrentTab() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var shName = sh.getName();
+
+  if (shName == "Inventory")        { updateInventory(); }
+  else if (shName == "Products")    { updateProducts(); }
+  else if (shName == "Customers")   { updateCustomers(); }
+  else if (shName == "Invoices")    { updateInvoices(); }
+  else if (shName == "P&D")         { updateCustomersPayments(); }
+  else if (shName == "All Balances"){ updateAllBalances(); }
+  else if (shName == "Balance")     { showTransactions(); }
+  else if (shName == "Discounts")   { getDiscounts(); }
+  else {
+    throw('"Inventory", "Products", "Discounts", "Customers", "Invoices", "Balance", "All Balances" or "P&D" tabs can be updated only.');
+  }
+}
+```
+
+| Active sheet | Function invoked |
+|---|---|
+| `Inventory` | `updateInventory()` |
+| `Products` | `updateProducts()` |
+| `Customers` | `updateCustomers()` |
+| `Invoices` | `updateInvoices()` |
+| `P&D` | `updateCustomersPayments()` |
+| `All Balances` | `updateAllBalances()` |
+| `Balance` | `showTransactions()` |
+| `Discounts` | `getDiscounts()` |
+| Any other sheet | Throws an error listing valid tab names |
+
+<Warning>
+  Calling **Update Current Tab** (or clicking **Refresh current tab** in the sidebar) while an unsupported sheet is active will throw an error. Navigate to one of the named tabs listed above before refreshing.
+</Warning>
+
+## `navigateTo(type, id)`
+
+Several actions need to open an external URL — for example, jumping to a customer's Google Drive folder or to a linked spreadsheet. Because Apps Script cannot open browser tabs directly from server-side code, `navigateTo` builds a tiny redirect page and displays it as a modal dialog. The page uses `window.open()` in client-side JavaScript to launch the URL in a new tab, then closes itself automatically:
+
+```javascript
+function navigateTo(type, id) {
+  var html = '<!DOCTYPE html><html><body>'
+    + '<button onclick="google.script.host.close()">Close</button>'
+    + '<script>window.open("';
+  if (type == "sheet") {
+    html += 'https://docs.google.com/spreadsheets/d/';
+  } else if (type == "folder") {
+    html += 'https://drive.google.com/drive/folders/';
+  }
+  html += id + '","_blank"); google.script.host.close();</script></body></html>';
+
+  var output = HtmlService.createHtmlOutput(html)
+    .setWidth(300).setHeight(100)
+    .setSandboxMode(HtmlService.SandboxMode.IFRAME);
+  SpreadsheetApp.getUi().showModalDialog(output, 'Redirecting....');
+}
+```
+
+| `type` value | URL prefix |
+|---|---|
+| `"sheet"` | `https://docs.google.com/spreadsheets/d/` |
+| `"folder"` | `https://drive.google.com/drive/folders/` |
+
+## Error Handling
+
+All `google.script.run` calls in the sidebar wire up the same `onFailure` handler, which displays the error message as a red Buefy toast notification at the bottom of the screen for three seconds. Successful responses go through `onSuccess`, which can optionally display a success toast and/or trigger a follow-up refresh (e.g. `updateInventory` or `updateInvoices`) based on flags returned in the server response payload.

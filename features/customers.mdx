@@ -1,0 +1,195 @@
+---
+title: "Manage Customers in Arsinous V8 Sales"
+sidebarTitle: "Customers"
+description: "Add, edit, and sync customers from MySQL to the Customers sheet. Each customer gets a linked Google Drive folder for storing invoices and documents."
+---
+
+The Customers module is the foundation of Arsinous V8 Sales — every invoice, payment, and discount is anchored to a customer record. Customer data lives in your MySQL `customers` table and is synced on demand into the **Customers** sheet, where each row also carries a hyperlink directly to that customer's Google Drive folder. This tight integration between your database, your spreadsheet, and Drive means all sales documents, PDfs, and correspondence stay organised alongside the structured data that drives your reporting.
+
+## The Customers Sheet
+
+The Customers sheet contains one customer per row. Columns are mapped automatically from MySQL column names, so the sheet header row must match the database field names exactly.
+
+| Column | MySQL field | Description |
+|--------|-------------|-------------|
+| A | `id` | Auto-increment primary key |
+| B | `code` | Short customer code (format: `NN-NN LLL`) |
+| C | `name` | Full customer name |
+| D | `address` | Street address (multi-line) |
+| E | `municipality` | Municipality / district |
+| F | `city` | City |
+| G | `zip` | Postal code |
+| H | `phone` | Phone number(s) |
+| I | `details` | Free-text notes and additional details |
+| J | `folder` | Google Drive folder ID |
+| K | *(generated)* | Clickable Drive folder hyperlink |
+
+<Note>
+  The **Customers** sheet must exist with these exact column headers in row 1 before running `updateCustomers`. The sync function maps MySQL column names to sheet headers by name — any mismatch will leave that column blank.
+</Note>
+
+## Syncing Customers from MySQL
+
+`updateCustomers(conn)` pulls the full customer list from MySQL and refreshes the sheet in one operation:
+
+1. Clears the data range `A2:M` (preserving the header row).
+2. Opens a JDBC connection and executes `SELECT * FROM customers`.
+3. Maps each result column to the matching sheet header by name.
+4. Writes all rows in a single `setValues` call.
+5. Generates a `HYPERLINK` formula for each row's Drive folder column using the stored `folder` ID.
+
+```javascript
+// Excerpt from Customer/backend.gs
+function updateCustomers(conn) {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName("Customers");
+  var keys = sh.getDataRange().getDisplayValues()[0];
+  sh.getRange("A2:M").clearContent();
+  var products = [];
+  conn = conn || Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.createStatement();
+  var results = stmt.executeQuery("SELECT * FROM customers");
+  var numCols = results.getMetaData().getColumnCount();
+
+  while (results.next()) {
+    var product = keys.map(function(v) { return ""; });
+    for (var col = 0; col < numCols; col++) {
+      var header = results.getMetaData().getColumnName(col + 1);
+      var index = keys.indexOf(header);
+      if (index > -1) {
+        product[index] = results.getString(col + 1);
+      }
+    }
+    products.push(product.slice());
+  }
+  results.close();
+  conn.close();
+
+  if (products.length > 0) {
+    var lastCol = keys.length;
+    sh.getRange(2, 1, products.length, lastCol).setValues(products);
+    var folderIndex = keys.indexOf("folder");
+    var formulas = products.map(function(v) {
+      return ['=hyperlink("https://drive.google.com/drive/folders/' + v[folderIndex] + '","Link to folder")'];
+    });
+    sh.getRange(2, lastCol - 1, formulas.length, 1).setFormulas(formulas);
+  }
+  ss.toast('"Customers" tab is updated');
+}
+```
+
+To trigger a sync, go to **Arsinous menu → Update Current Tab** while the Customers sheet is active, or click the **Refresh** button in the sidebar.
+
+## Adding a New Customer
+
+<Steps>
+  <Step title="Open the Add Customer dialog">
+    Click **Add** in the Arsinous sidebar, or navigate to **Arsinous menu → Add Customer**. This calls `showCustomer()` with no arguments, so the form opens pre-filled with `DefaultCustomer` defaults (all fields null).
+  </Step>
+  <Step title="Fill in the customer details">
+    The modal dialog (600 × 650 px, built with Vuetify) presents the following fields:
+
+    - **Code** — required; must match the format `NN-NN LLL` (validated before save)
+    - **Name** — required
+    - **Address** — multi-line text area
+    - **Municipality** and **City** — side by side
+    - **Postal Code** and **Phone** — side by side
+    - **Details** — free-text notes (5-row text area)
+
+    The **ID** field is shown as disabled — it is assigned by MySQL on insert.
+  </Step>
+  <Step title="Save the record">
+    Click **Save**. The dialog calls `saveCustomerToDb(data)` via `google.script.run`. Because `data.folder` is not set for a new customer, the backend automatically creates a new Google Drive subfolder under `CUSTOMERS_FOLDER` and stores the resulting folder ID in the `folder` column.
+  </Step>
+  <Step title="Sheet refreshes">
+    After a successful save the dialog closes. Run **Update Current Tab** (or the sidebar Refresh button) to pull the new record into the Customers sheet.
+  </Step>
+</Steps>
+
+## Editing an Existing Customer
+
+1. Navigate to the **Customers** sheet and click any cell in the target customer's row.
+2. Go to **Arsinous menu → Edit Customer** (or click **Edit** in the sidebar). This calls `editCustomer()`.
+3. `editCustomer()` reads the header row to build a key list, sets `customerData.id` from column A of the selected row, then calls `showCustomer(customerData)`.
+4. The modal opens in edit mode (`loading: true`), immediately fetches the full record from MySQL via `getItemsFromDB(id, "customers", "id")`, and populates all fields.
+5. Make your changes, then click **Save**. `saveCustomerToDb(data)` runs an `UPDATE customers SET ...` statement for the existing record.
+
+```javascript
+// Excerpt from Customer/backend.gs
+function editCustomer() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var row = sh.getActiveCell().getRow();
+  var id = sh.getRange(row, 1).getValue();
+  if (sh.getName() != "Customers" || row < 2 || id == "") {
+    var sh = ss.getSheetByName("Customers");
+    sh.activate();
+    throw('Select customer to edit from "Customers" tab');
+  }
+  var customerData = {};
+  var keys = sh.getDataRange().getDisplayValues()[0].filter(function(v) { return v != ""; });
+  keys.forEach(function(v) { customerData[v] = null; });
+  customerData.id = id;
+  showCustomer(customerData);
+}
+```
+
+## Navigating to a Customer's Drive Folder
+
+Select any row in the Customers sheet, then choose **Arsinous menu → Open Customer Folder**. This calls `navigateToCustomersFolder()`, which reads the `folder` column value for the selected row and opens `https://drive.google.com/drive/folders/<folder_id>` in a new browser tab via `navigateTo()`.
+
+```javascript
+// Excerpt from Customer/backend.gs
+function navigateToCustomersFolder() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var row = sh.getActiveCell().getRow();
+  if (sh.getName() != "Customers" || row < 2) {
+    throw('Select customer to edit from "Customers" tab');
+  }
+  var data = sh.getDataRange().getDisplayValues();
+  for (var i = 0; i < data[0].length; i++) {
+    if (data[0][i] == 'folder') { break; }
+  }
+  var id = data[row - 1][i];
+  navigateTo('folder', id);
+}
+```
+
+## Customer Fields Reference
+
+<ParamField body="code" type="string" required>
+  Short alphanumeric customer code. Must follow the `NN-NN LLL` format (validated in the modal before saving). Used as a reference on invoices and reports.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  Full customer name. Displayed in invoice autocomplete dropdowns and the Balance sheet.
+</ParamField>
+
+<ParamField body="address" type="string">
+  Street address. Supports multi-line input.
+</ParamField>
+
+<ParamField body="municipality" type="string">
+  Municipality or administrative district.
+</ParamField>
+
+<ParamField body="city" type="string">
+  City name.
+</ParamField>
+
+<ParamField body="zip" type="string">
+  Postal / ZIP code.
+</ParamField>
+
+<ParamField body="phone" type="string">
+  Phone number or numbers. Free-text — no format enforcement.
+</ParamField>
+
+<ParamField body="details" type="string">
+  Free-text field for any additional notes, tax numbers, or contact details. Displayed in the invoice spreadsheet header area.
+</ParamField>
+
+<ParamField body="folder" type="string">
+  Google Drive folder ID. Set automatically on first save if not provided. The Customers sheet uses this to generate the clickable **Link to folder** hyperlink and to place invoice shortcuts inside the correct folder.
+</ParamField>

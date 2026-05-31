@@ -1,0 +1,190 @@
+---
+title: "Accounts Receivable Aging Report"
+sidebarTitle: "Accounts Receivable"
+description: "Bucket outstanding customer balances into aging periods — 0-30, 30-60, 60-90, 90-120, and over 120 days — using the accoutsReceivable formula."
+---
+
+Knowing a customer's total balance tells only part of the story. The **`accoutsReceivable`** custom formula goes further by working backwards through the transaction history to identify *which specific invoices* are still outstanding, then sorting them into five aging buckets based on how many days have elapsed since each invoice date. The result is a compact 3×4 grid that gives you an instant read on the age of the money owed.
+
+<Note>
+The function is spelled **`accoutsReceivable`** (missing the second `c` in "accounts") in the source code — this is an intentional quirk of the original implementation. Always use this exact spelling when entering it as a formula or calling it from script.
+</Note>
+
+## How `accoutsReceivable` Works
+
+The function accepts a range of transaction rows and a reference date, then returns a 3-row × 4-column array placed directly in the sheet.
+
+### Input Parameters
+
+| Parameter      | Type            | Description                                                                               |
+|----------------|-----------------|-------------------------------------------------------------------------------------------|
+| `transactions` | Range / Array   | Rows of `[date-string, type, name, amount]` — matches columns A–D of the Balance sheet from row 11 downward |
+| `date`         | Date            | Reference date used to compute how many days ago each invoice was raised                  |
+
+If the function is called with **no arguments**, it automatically reads from the Balance sheet: `transactions` from `A11:D` and `date` from `C2`.
+
+### Output Grid
+
+The function returns a **3-row × 4-column** array structured as follows:
+
+| Row | Column A (label) | Column B (amount) | Column C (label)  | Column D (amount) |
+|-----|------------------|-------------------|-------------------|-------------------|
+| 1   | TOTAL            | `<net total>`     | 60-90 days        | `<amount>`        |
+| 2   | 0-30 days        | `<amount>`        | 90-120 days       | `<amount>`        |
+| 3   | 30-60 days       | `<amount>`        | over 120 days     | `<amount>`        |
+
+<Note>
+If there are transactions before the filtered date range that contribute to the outstanding balance (i.e., the walked-back unpaid total is less than the net total), a fourth row is appended automatically with the label **`Opening`** and the residual amount. This row does not appear if all unpaid invoices are found within the transaction list.
+</Note>
+
+### Aging Bucket Logic
+
+The function uses **millisecond arithmetic** to compare each unpaid invoice date against the reference date. The boundary for each bucket is a multiple of `30 × 24 × 60 × 60 × 1000` milliseconds (30 days):
+
+| Elapsed time since invoice date       | Bucket        |
+|---------------------------------------|---------------|
+| Less than 30 days                     | 0-30 days     |
+| 30 days or more, less than 60 days    | 30-60 days    |
+| 60 days or more, less than 90 days    | 60-90 days    |
+| 90 days or more, less than 120 days   | 90-120 days   |
+| 120 days or more                      | over 120 days |
+
+Invoice dates are parsed from `"YYYY-MM-DD"` strings using `.split("-")` and then constructed as `new Date(year, month - 1, day)`.
+
+### Step-by-Step Algorithm
+
+<Steps>
+  <Step title="Filter empty rows">
+    The input `transactions` array is filtered to remove any row where the first element (date) is an empty string. This handles the tail end of an open-ended range like `A11:D`.
+  </Step>
+  <Step title="Compute the net total receivable">
+    All `amount` values (column D / index 3) in the filtered transactions are summed. This becomes the `TOTAL` value in the output grid. Both positive (invoice) and negative (payment) amounts are included, so the total reflects the true net balance owed.
+  </Step>
+  <Step title="Walk backwards to find unpaid invoices">
+    Starting from the most recent transaction and moving backwards, the function accumulates positive-amount rows (invoices) until the running sum of those invoices reaches or exceeds the net total. This identifies which invoices have not yet been covered by payments.
+  </Step>
+  <Step title="Adjust for partial coverage">
+    - If `unpaidTotal > total`: the oldest walked-back invoice is only partially unpaid. Its amount is reduced by the difference (`unpaidTotal - total`) before aging.
+    - If `unpaidTotal < total`: an `Opening` row is appended to the output representing the portion of the balance that predates the available transaction history.
+  </Step>
+  <Step title="Bucket each unpaid invoice by age">
+    For each unpaid invoice, the date string is parsed and the elapsed milliseconds since the reference date are computed. The invoice amount is added to the appropriate aging bucket.
+  </Step>
+</Steps>
+
+## Full Source
+
+```javascript
+// Formulas.gs — accoutsReceivable()
+function accoutsReceivable(transactions, date) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var timezone = ss.getSpreadsheetTimeZone();
+
+  // Default: read from the Balance sheet
+  if (!transactions) {
+    var sheet = ss.getSheetByName('Balance');
+    transactions = sheet.getRange("A11:D").getValues();
+    date = sheet.getRange("C2").getValue();
+  }
+
+  // Remove empty rows
+  transactions = transactions.filter(function (v) { return v[0] != ''; });
+
+  var output = [
+    ['TOTAL',      0, '60-90 days',    0],
+    ['0-30 days',  0, '90-120 days',   0],
+    ['30-60 days', 0, 'over 120 days', 0]
+  ];
+
+  // Net total (invoices minus payments)
+  var total = transactions.reduce(function (prev, cur) {
+    return prev + cur[3];
+  }, 0);
+  output[0][1] = total * 1;
+
+  if (total > 0) {
+    var unpaid = [];
+    var unpaidTotal = 0;
+    var row = transactions.length - 1;
+
+    // Walk backwards accumulating positive-amount (invoice) rows
+    while (unpaidTotal < total && row >= 0) {
+      if (transactions[row][3] > 0) {
+        unpaid.push(transactions[row]);
+        unpaidTotal += transactions[row][3] * 1;
+      }
+      row--;
+    }
+
+    // Partial last invoice: trim the overshoot
+    if (unpaidTotal > total) {
+      var diff = unpaidTotal - total;
+      unpaid[unpaid.length - 1][3] -= diff;
+    }
+
+    // Balance predates available history: add an Opening row
+    if (unpaidTotal < total) {
+      output.push(['Opening', total - unpaidTotal, '', '']);
+    }
+
+    // Bucket each unpaid invoice by age
+    var time = date.getTime();
+    unpaid.forEach(function (v) {
+      var v_date = v[0].split("-");
+      v_date = new Date(v_date[0], v_date[1] - 1, v_date[2]);
+
+      if      (time - v_date.getTime() < 30  * 24 * 60 * 60 * 1000) { output[1][1] += v[3] * 1; }
+      else if (time - v_date.getTime() < 60  * 24 * 60 * 60 * 1000) { output[2][1] += v[3] * 1; }
+      else if (time - v_date.getTime() < 90  * 24 * 60 * 60 * 1000) { output[0][3] += v[3] * 1; }
+      else if (time - v_date.getTime() < 120 * 24 * 60 * 60 * 1000) { output[1][3] += v[3] * 1; }
+      else                                                            { output[2][3] += v[3] * 1; }
+    });
+  }
+
+  return output;
+}
+```
+
+## Using the Formula in the Sheet
+
+Enter the formula in any empty cell. It returns a spilled array, so leave the surrounding 3×4 area (or 4×4 if an Opening row is expected) clear.
+
+```
+=accoutsReceivable(A11:D, C2)
+```
+
+To reference data from the Balance sheet while placing the formula on a different sheet:
+
+```
+=accoutsReceivable(Balance!A11:D, Balance!C2)
+```
+
+<Tip>
+Set the reference date in **cell C2** of the Balance sheet to control which date is used for aging calculations. Today's date is a natural choice, but you can enter any past date to see how the aging would have looked at that point in time — useful for month-end or audit reporting.
+</Tip>
+
+### Calling Programmatically from Apps Script
+
+```javascript
+// Called as a Sheets custom function:
+// =accoutsReceivable(Balance!A11:D, Balance!C2)
+
+// Or called programmatically from another Apps Script function:
+var result = accoutsReceivable(transactions, new Date());
+// Returns a 3-row × 4-column array (or 4-row if an Opening balance exists)
+```
+
+## Expected Date Format
+
+The `transactions` range must supply dates in the **`"YYYY-MM-DD"`** string format (the default format used by MySQL `DATE` columns). The function splits on `-` and constructs a JavaScript `Date` object:
+
+```javascript
+var v_date = v[0].split("-");
+// e.g. "2024-03-15" → ["2024", "03", "15"]
+v_date = new Date(v_date[0], v_date[1] - 1, v_date[2]);
+// → new Date(2024, 2, 15)  (month is 0-indexed)
+```
+
+<Warning>
+If the date strings in your transaction range are not in `"YYYY-MM-DD"` format — for example, if they have been auto-formatted by Sheets into a locale-specific display format — the `split("-")` call will produce incorrect results and the aging buckets will be wrong. Ensure the date column is formatted as **Plain text** or **`YYYY-MM-DD`** before using this formula.
+</Warning>

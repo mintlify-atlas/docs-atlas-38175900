@@ -1,0 +1,166 @@
+---
+title: "All Customer Balances Summary View"
+sidebarTitle: "All Balances"
+description: "Refresh the All Balances tab to see each customer's net outstanding balance, calculated from all invoices minus all payments in MySQL."
+---
+
+Rather than opening each customer's Balance sheet one at a time, the **All Balances** tab gives you a single-screen overview of every customer's net position. A single refresh command queries MySQL, aggregates invoices and payments for every customer in one UNION query, and writes the results back to the sheet — alphabetically sorted and timestamped — in seconds.
+
+## What the Sheet Shows
+
+The **All Balances** sheet displays two columns of data beginning at row 3:
+
+| Column | Header  | Description                                                                              |
+|--------|---------|------------------------------------------------------------------------------------------|
+| A      | Name    | The customer's name as stored in the `customers` MySQL table                             |
+| B      | Balance | Net outstanding amount — invoices total minus payments total, across all time            |
+
+A **refresh timestamp** is written to cell **B1** each time the sheet is updated, so you always know how fresh the data is.
+
+<Note>
+The balance figure is calculated from the customer's **complete transaction history** — there is no date range filter applied. A positive balance means the customer owes money (total invoices exceed total payments). A negative balance means the customer is in credit (payments exceed invoices).
+</Note>
+
+## How `updateAllBalances()` Works
+
+`updateAllBalances()` runs a single UNION query against MySQL that aggregates both payments and invoices per customer, then sums the two together to produce a net balance per name.
+
+<Steps>
+  <Step title="Activate the All Balances sheet and clear existing data">
+    The function activates the All Balances sheet and clears the range **A3:D** to remove any previously written data before writing the fresh results.
+  </Step>
+  <Step title="Run the UNION aggregation query">
+    A nested UNION query first sums payments (as negative amounts) and invoices (as positive amounts) per customer name in separate branches, then groups and sums the combined result by customer name.
+  </Step>
+  <Step title="Sort alphabetically">
+    The result array is sorted A→Z by customer name in Apps Script before writing, so the sheet is always in a predictable alphabetical order regardless of the order MySQL returns rows.
+  </Step>
+  <Step title="Write results and timestamp">
+    Headers (`Name`, `Balance`) are prepended to the output array. The full array is written to the sheet starting at row 3. The current date and time is written to **B1** as a refresh timestamp.
+  </Step>
+</Steps>
+
+## The SQL Query
+
+The balance for each customer is derived from a two-branch UNION that treats payments and invoices symmetrically before collapsing them into a single net figure:
+
+```sql
+SELECT T.name, sum(T.amount)
+FROM (
+  -- Branch 1: payments (stored positive in DB, negated here)
+  SELECT customers.name,
+         sum(-customers_payments.amount) AS amount
+    FROM customers
+    INNER JOIN customers_payments
+            ON customers_payments.customer_id = customers.id
+   GROUP BY customers.name
+
+  UNION
+
+  -- Branch 2: invoices (total + VAT)
+  SELECT customers.name,
+         sum(invoices.total + invoices.vat) AS amount
+    FROM customers
+    INNER JOIN invoices
+            ON invoices.customer_id = customers.id
+   GROUP BY customers.name
+
+) as T
+GROUP BY T.name;
+```
+
+The outer `GROUP BY T.name` sums the two branches per customer, giving a single net balance row per customer.
+
+## Full Source
+
+```javascript
+// Updates.gs — updateAllBalances()
+function updateAllBalances() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName("All Balances");
+  sh.activate();
+
+  sh.getRange("A3:D").clearContent();
+
+  var query =
+    'SELECT T.name, sum(T.amount) FROM ( '
+    + 'SELECT customers.name, sum(-customers_payments.amount) AS amount '
+    +   'FROM customers '
+    +   'INNER JOIN customers_payments ON customers_payments.customer_id = customers.id '
+    +   'GROUP BY customers.name '
+    + 'UNION '
+    + 'SELECT customers.name, sum(invoices.total + invoices.vat) AS amount '
+    +   'FROM customers '
+    +   'INNER JOIN invoices ON invoices.customer_id = customers.id '
+    +   'GROUP BY customers.name '
+    + ') as T GROUP BY T.name;';
+
+  var headers = ['Name', 'Balance'];
+  var output = [];
+
+  var conn = Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.createStatement();
+  var results = stmt.executeQuery(query);
+
+  while (results.next()) {
+    var line = [];
+    for (var col = 0; col < 2; col++) {
+      line.push(results.getString(col + 1));
+    }
+    output.push([line[0], line[1]]);
+  }
+
+  results.close();
+  conn.close();
+
+  // Sort alphabetically by customer name
+  output.sort(function (a, b) {
+    if (a[0] > b[0]) return 1;
+    if (a[0] < b[0]) return -1;
+    return 0;
+  });
+
+  output.unshift(headers);
+  sh.getRange(3, 1, output.length, output[0].length).setValues(output);
+
+  // Write refresh timestamp to B1
+  sh.getRange("B1").setValue(new Date());
+}
+```
+
+## Refreshing the All Balances Tab
+
+<CardGroup cols={2}>
+  <Card title="Arsinous Menu" icon="bars">
+    Navigate to the **All Balances** sheet, then open the **Arsinous** menu and select **Update Current Tab**. The `updateCurrentTab()` dispatcher detects the active sheet name and routes to `updateAllBalances()` automatically.
+  </Card>
+  <Card title="Sidebar" icon="sidebar">
+    Open the **Arsinous sidebar** from the menu and use the refresh action. The sidebar calls `updateAllBalances()` directly via `google.script.run`.
+  </Card>
+</CardGroup>
+
+```javascript
+// Updates.gs — updateCurrentTab() dispatcher
+function updateCurrentTab() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var shName = sh.getName();
+
+  if (shName == "All Balances") {
+    updateAllBalances();
+  }
+  // ... other sheet handlers
+}
+```
+
+<Warning>
+`updateAllBalances()` does not show a progress toast while running. For spreadsheets with a large number of customers, the JDBC query may take several seconds. Do not navigate away from the sheet or trigger a second refresh before the timestamp in B1 updates.
+</Warning>
+
+## Drilling Into a Specific Customer
+
+The All Balances view is intentionally summary-only — it shows the net figure but not the underlying transactions.
+
+<Tip>
+To see the full transaction history behind any balance, go to the **Balance** sheet and type the customer's name into **cell A1**. The `onEdit` trigger will call `showTransactions()` and load every invoice and payment for that customer in date order. See the [Balance sheet documentation](/reports/balance) for details.
+</Tip>

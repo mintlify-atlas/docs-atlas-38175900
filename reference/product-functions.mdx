@@ -1,0 +1,137 @@
+---
+title: "Product Script Functions Reference"
+sidebarTitle: "Product Functions"
+description: "Apps Script functions for displaying, creating, editing, and syncing products between Google Sheets and the MySQL products table."
+---
+
+The product module manages the catalog of goods tracked in Arsinous V8 Sales. It provides a modal dialog for creating and editing product records, a sheet sync function that rewrites the **Products** tab from the MySQL `products` table, and an edit helper that works from either the **Products** or **Inventory** sheet. Products carry pricing tiers (cost, price, retail), a VAT code, and default discount rules that drive the invoice line-item calculations. All persistent changes route through [`saveProductToDb`](/reference/db-functions#saveproducttodb), which handles the INSERT/UPDATE and triggers a sheet refresh.
+
+---
+
+## `showProduct(productData)`
+
+Opens a **600 × 600** modal dialog rendered from the `product/index` HTML template. The dialog title and initial loading state are determined by whether a product object is supplied.
+
+- When called **without** `productData`: uses `DefaultProduct` as the template data, sets `loading: false`, and titles the dialog **"Add New Product"**.
+- When called **with** `productData`: passes the object to the template, sets `loading: true` (triggering a database fetch inside the dialog), and titles the dialog **"Edit Product"** (because `productData.id` is truthy).
+
+In addition to the product object, the `Vat` constant is always injected into the template data so the dialog can render the correct VAT rate options.
+
+```javascript
+function showProduct(productData) {
+  var data = {
+    loading: true,
+    message: "Requesting data from Database...",
+    product: productData || DefaultProduct,
+    vat: Vat,
+    snackbar: false,
+    snackbar_color: "error",
+    snackbar_text: null
+  };
+  var html = HtmlService.createTemplateFromFile("product/index");
+  data.loading = !!productData ? true : false;
+  html.data = JSON.stringify(data);
+  html = html.evaluate();
+  html.addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, minimal-ui');
+  html.setWidth(600).setHeight(600);
+  var title = data.product.id ? "Edit " : "Add New ";
+  SpreadsheetApp.getUi().showModalDialog(html, title + 'Product');
+}
+```
+
+<ParamField path="productData" type="Object" optional>
+  A partial product object. When the `id` property is set, the dialog operates in **edit mode**. If omitted or `null`, the dialog opens in **create mode** using `DefaultProduct` defaults. The default product shape (from `Constants.gs`) is:
+
+  ```javascript
+  var DefaultProduct = {
+    code: null,
+    name: null,
+    cat: null,
+    vat_code: 3,        // 19% VAT by default
+    price: 0,
+    retail: 0,
+    def_discount: "6+2,12+6",
+    def_fixed_discount: "20"
+  }
+  ```
+</ParamField>
+
+<Note>
+  The `Vat` constant (defined in `Constants.gs`) maps VAT codes to their percentage values and display names. Code `"1"` = 0%, `"2"` = 5%, `"3"` = 19%. It is passed to the dialog so the UI can render a dropdown without an additional database round-trip.
+</Note>
+
+---
+
+## `editProduct()`
+
+Reads the currently selected row from the **Products** or **Inventory** sheet, builds a sparse product object from the sheet's column headers, and delegates to `showProduct(productData)` in edit mode.
+
+**Validation rules (throws on failure):**
+1. Active sheet name must be `"Products"` or `"Inventory"`.
+2. Active cell row must be ≥ 2.
+3. Column A value of the selected row must be non-empty (the product `id`).
+
+If any rule fails, the function activates the Products sheet and throws `'Select product to edit from "Products" or "Inventory" tab'`.
+
+```javascript
+function editProduct() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var row = sh.getActiveCell().getRow();
+  var id = sh.getRange(row, 1).getValue();
+  if ((sh.getName() != "Products" && sh.getName() != "Inventory") || row < 2 || id == "") {
+    var sh = ss.getSheetByName("Products");
+    sh.activate();
+    throw('Select product to edit from "Products" or "Inventory" tab');
+  }
+  var productData = {};
+  var keys = sh.getDataRange().getDisplayValues().splice(1, 1)[0].filter(function(v){ return v != ""; });
+  keys.forEach(function(v){ productData[v] = null; });
+  productData.id = id;
+  showProduct(productData);
+}
+```
+
+**Header extraction:** Unlike the customer equivalent, `editProduct` uses `.splice(1, 1)[0]` — it reads **row index 1** (the second row of the data range, i.e., the display row beneath the top header) to obtain column headers. This is significant on the Inventory sheet, which has two header rows: a title row (row 1) and a column-name row (row 2). The `splice` call extracts that second array element.
+
+<Note>
+  Only the `id` field is populated before the dialog opens. All other product field values are fetched from the database by the dialog's own initialization logic after rendering.
+</Note>
+
+---
+
+## `updateProducts(conn)`
+
+Refreshes the **Products** sheet by clearing its existing data rows and rewriting every product from a `SELECT * FROM products` query. After writing data, it stamps the update time into cells `K1:L1`.
+
+```javascript
+function updateProducts(conn) {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName("Products");
+  var keys = sh.getDataRange().getDisplayValues().splice(0, 1)[0];
+  sh.getRange("A2:M").clearContent();
+  conn = conn || Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.createStatement();
+  var results = stmt.executeQuery("SELECT * FROM products");
+  // maps each result column to its matching sheet column by header name
+  // ...
+  if (products.length > 0) {
+    sh.getRange(2, 1, products.length, keys.length).setValues(products);
+  }
+  sh.activate();
+  sh.getRange(1, 11, 1, 2).setValues([["Updated:", new Date()]]);
+  ss.toast('"Products" tab is updated');
+}
+```
+
+**Column mapping:** Headers are read from row 1 of the Products sheet (`.splice(0, 1)[0]`). Each column returned by MySQL is matched to its corresponding sheet column by name. Columns present in MySQL but absent from the sheet header row are silently skipped.
+
+**Timestamp:** After writing all product rows, `updateProducts` writes `["Updated:", new Date()]` into cells `K1:L1` so users can see exactly when the last sync occurred.
+
+<ParamField path="conn" type="JdbcConnection" optional>
+  An already-open JDBC connection to reuse. If not provided, the function opens its own connection using the global `InstanceUrl`, `User`, and `UserPwd` constants. The connection is closed after reading results, so a passed-in connection will be closed by the time the function returns.
+</ParamField>
+
+<Warning>
+  `updateProducts` always closes the connection it uses. If you pass a shared connection that must remain open for subsequent operations, be aware it will be closed here. In the standard `saveProductToDb` flow this is intentional, as `updateProducts` is always the final step.
+</Warning>

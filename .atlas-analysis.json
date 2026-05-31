@@ -1,0 +1,140 @@
+{
+  "projectType": "saas",
+  "projectName": "Arsinous V8 Sales",
+  "projectDescription": "A Google Apps Script-based sales management system built on Google Sheets that connects to a MySQL database to manage customers, products, invoices, inventory, payments, and financial reporting.",
+  "theme": "luma",
+  "primaryColor": "#1A1A2E",
+  "lightColor": "#4A90D9",
+  "darkColor": "#0D0D1A",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "setup",
+              "configuration"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/customers",
+              "features/products",
+              "features/invoices",
+              "features/inventory",
+              "features/payments",
+              "features/discounts"
+            ]
+          },
+          {
+            "group": "Financial Reports",
+            "pages": [
+              "reports/balance",
+              "reports/accounts-receivable",
+              "reports/all-balances"
+            ]
+          },
+          {
+            "group": "Sidebar & Navigation",
+            "pages": [
+              "sidebar/overview",
+              "sidebar/date-filters"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Script Functions",
+            "pages": [
+              "reference/customer-functions",
+              "reference/product-functions",
+              "reference/invoice-functions",
+              "reference/payment-functions",
+              "reference/discount-functions",
+              "reference/update-functions",
+              "reference/db-functions"
+            ]
+          },
+          {
+            "group": "Data Model",
+            "pages": [
+              "reference/database-schema",
+              "reference/constants"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Customer management with Google Drive folder integration",
+    "Product catalog with VAT codes and pricing tiers",
+    "Invoice creation and editing with lot-based inventory tracking",
+    "Credit note support alongside standard invoices",
+    "Customer payment recording with deposit tracking",
+    "Per-customer product discount management (percentage and fixed)",
+    "Real-time inventory tracking with expiry dates and lot numbers",
+    "Statement of Account (SoA) with running balance",
+    "Accounts receivable aging report (0-30, 30-60, 60-90, 90-120, 120+ days)",
+    "All-customer balance summary view",
+    "Google Sheets sidebar for quick navigation and date-period filtering",
+    "MySQL backend via Google Apps Script JDBC connector",
+    "Automated Google Sheets invoice document generation from a template",
+    "onEdit triggers for automatic tab refresh"
+  ],
+  "publicApiSurface": [
+    "showCustomer(customerData)",
+    "editCustomer()",
+    "updateCustomers(conn)",
+    "navigateToCustomersFolder()",
+    "saveCustomerToDb(data, id)",
+    "showProduct(productData)",
+    "editProduct()",
+    "updateProducts(conn)",
+    "saveProductToDb(data)",
+    "showInvoice(id, type)",
+    "saveInvoice(data)",
+    "getInvoice(id)",
+    "getNextId()",
+    "updateInvoices(ss, sh)",
+    "deleteInvoice(id)",
+    "createInvoiceSs(ssId, data)",
+    "updateInvoiceSs(ssId, data)",
+    "showPayment(id)",
+    "selectPaymentToEdit()",
+    "selectPaymentToDelete()",
+    "updateCustomersPayments()",
+    "saveCustomerPaymentToDb(data)",
+    "deleteCustomerPayment(id, conn)",
+    "getDiscounts(conn)",
+    "saveDiscounts(conn)",
+    "updateInventory(hideEmpty, sortCol)",
+    "updateCurrentTab()",
+    "updateAllBalances()",
+    "updateBalanceTab()",
+    "showTransactions()",
+    "accoutsReceivable(transactions, date)",
+    "runningBallance(amounts)",
+    "getDates()",
+    "showSidebar()",
+    "readProperties()",
+    "updateProperty(key, value)",
+    "refreshAllProperties(data)",
+    "editInvoiceOrNote(type)",
+    "deleteInvoiceOrNote(type)",
+    "getAllFromDB(type, query, fullQuery)",
+    "getItemsFromDB(id, table, col, conn)",
+    "getProductFromDB(id)",
+    "getFromDbAsArray(conn, query)",
+    "navigateTo(type, id)",
+    "onOpen(e)",
+    "onEdit(e)"
+  ]
+}

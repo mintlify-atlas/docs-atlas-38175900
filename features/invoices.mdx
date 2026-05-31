@@ -1,0 +1,208 @@
+---
+title: "Create and Manage Invoices and Credit Notes"
+sidebarTitle: "Invoices"
+description: "Issue invoices and credit notes from within Google Sheets. Each document is saved to MySQL, adjusts lot inventory, and generates a linked Google Sheets invoice file."
+---
+
+Invoices are the centrepiece of Arsinous V8 Sales. When you create an invoice, the system does much more than record a sale — it decrements the specific inventory lots you're selling from, writes the transaction into MySQL inside a database transaction, generates a formatted Google Sheets invoice document from a template, places a shortcut to that document in the customer's Drive folder, and writes a hyperlink back into the Invoices sheet. The same machinery runs for credit notes, with stock adjustments reversed to reflect returned goods.
+
+## Document Types
+
+Two document types share the same underlying data model and UI:
+
+| Type | `type` field value | Stock effect |
+|------|-------------------|--------------|
+| Invoice | `"invoice"` | Decrements `irs_items.in_stock` for each lot used |
+| Credit Note | `"credit note"` | Decrements with negative quantities (effectively restoring stock) |
+
+The document type is set when the modal is opened and is displayed in the invoice spreadsheet header area.
+
+## The Invoices Sheet
+
+`updateInvoices(ss, sh)` populates the Invoices sheet with a filtered, sorted view of the `invoices` table joined to customer names. The date range comes from `getDates()`, which reads the active time-period preference from user properties.
+
+| Column | Source | Description |
+|--------|--------|-------------|
+| A | `invoices.id` | Invoice ID |
+| B | `invoices.type` | `"invoice"` or `"credit note"` |
+| C | `invoices.name` | Invoice number (zero-padded 6-digit string) |
+| D | `customers.name` | Customer name (from JOIN) |
+| E | `invoices.date` | Invoice date |
+| F | `invoices.total` | Total before VAT |
+| G | `invoices.vat` | VAT amount |
+| H | *(calculated)* | Total with VAT (sum of F + G, inserted by the sync function) |
+| I | `invoices.comments` | Comments |
+| J | *(generated)* | `HYPERLINK` formula linking to the invoice Google Sheets file |
+
+Results are first sorted by `date DESC` from MySQL, then re-sorted by `id ASC` in Apps Script before writing to the sheet.
+
+## Creating an Invoice
+
+<Steps>
+  <Step title="Open the invoice dialog">
+    Go to **Arsinous menu → Create Invoice** or click **New Invoice** in the sidebar. This calls `showInvoice(null, "invoice")`, which opens a 1000 × 600 px Vuetify modal. On load, the modal fetches all customers, products, in-stock inventory lots (`irs_items WHERE in_stock > 0`), salesperson records, and customer discounts from MySQL in parallel.
+  </Step>
+  <Step title="Select a customer and date">
+    Use the **Customer** autocomplete (top-left) to search and select a customer. Only customers with `status = "active"` appear. Set the **Date** using the date-picker (defaults to today). The **Invoice #** field is auto-populated from `getNextId()` — a zero-padded 6-digit string based on the `AUTO_INCREMENT` value of the `invoices` table.
+  </Step>
+  <Step title="Add line items">
+    Click the **+** button to add a row. For each line item:
+    - Select a **Product** from the autocomplete — the list shows available stock in parentheses.
+    - Choose a **Lot** (expiry date selector) — defaults to the earliest-expiring lot.
+    - Enter a **Qty** — capped at the available stock for the chosen lot.
+    - Adjust the **Price** if needed (defaults to the product's `price` field).
+    - Open the **Discounts** dialog to override the quantity-break discount, fixed discount, or enter a manual discount percentage.
+
+    The toolbar continuously shows running **Total**, **VAT**, and **Total with VAT** figures.
+  </Step>
+  <Step title="Optionally add a salesperson and comments">
+    Select a **S/P** (salesperson) from the dropdown if applicable. Add any **Comments** in the text area at the bottom.
+  </Step>
+  <Step title="Create the document">
+    Click **Create**. The button is disabled until a customer is selected and the total is non-zero. This triggers `saveInvoice(data)` on the backend.
+  </Step>
+  <Step title="Inventory and sheet refresh">
+    After `saveInvoice` completes, the modal automatically triggers `updateInventory(true)` and then `updateInvoices()` to refresh both the Inventory and Invoices tabs before closing.
+  </Step>
+</Steps>
+
+## How `saveInvoice` Works
+
+<Note>
+  `saveInvoice(data)` wraps all database operations in a single JDBC transaction (`conn.setAutoCommit(false)` … `conn.commit()`). If any step fails, the entire operation is rolled back, leaving inventory and invoice records in a consistent state.
+</Note>
+
+The function performs these operations in order:
+
+**1. Calculate net lot quantity changes**
+
+Compares the new item quantities against any previously saved quantities for the same invoice (on edit), producing a delta map of `lot_id → net_qty_change`.
+
+**2. Adjust inventory lots**
+
+```javascript
+// Excerpt from invoice/backend.gs
+var stmt = conn.prepareStatement("UPDATE irs_items SET in_stock = in_stock - ? WHERE id = ?");
+for (var i = 0; i < lots.length; i++) {
+  stmt.setString(1, lots[i][1]);
+  stmt.setString(2, lots[i][0]);
+  stmt.addBatch();
+}
+stmt.executeBatch();
+```
+
+**3. Save the invoice header**
+
+For new invoices, inserts into `invoices` with fields: `type`, `customer_id`, `date`, `sp_id`, `name`, `total`, `vat`, `ss_id`, `comments`, `cost`. The generated `id` is captured via `RETURN_GENERATED_KEYS`.
+
+For existing invoices, updates the header fields and removes old line items before re-inserting.
+
+**4. Create or reuse the invoice spreadsheet**
+
+`createInvoiceSs(ssId, data)` looks up the Drive file by `ssId`. If it doesn't exist yet, it copies `InvoiceTemplate` into `InvoiceFolder` (named as the zero-padded invoice number) and creates a shortcut in the customer's Drive folder.
+
+```javascript
+// Excerpt from invoice/backend.gs
+function createInvoiceSs(ssId, data) {
+  var folder = DriveApp.getFolderById(data.customer.folder);
+  var invoice;
+  try { invoice = DriveApp.getFileById(ssId); } catch(err) {}
+  if (!invoice) {
+    invoice = DriveApp.getFileById(InvoiceTemplate)
+                .makeCopy(("000000" + data.id).slice(-6),
+                          DriveApp.getFolderById(InvoiceFolder));
+    folder.createShortcut(invoice.getId());
+  }
+  return invoice.getId();
+}
+```
+
+**5. Save invoice line items**
+
+Inserts all items into `invoices_items` with fields: `invoice_id`, `product_id`, `lot_id`, `qty`, `price`, `discount`, `fixed_discount`, `manual_discount`, `code`, `cost`, `priceAfterDiscount`.
+
+**6. Update the invoice spreadsheet content**
+
+`updateInvoiceSs(ssId, data)` opens the invoice Google Sheets file and writes customer code, date, invoice number, salesperson, and the full items grid (columns A–O, rows 15–54).
+
+**7. Commit the transaction**
+
+`conn.commit()` finalises all database changes. The connection is then closed before the Drive and Sheets operations run.
+
+## Editing an Invoice
+
+1. Select a row in the **Invoices** sheet or the **Balance** sheet.
+2. Go to **Arsinous menu → Edit Invoice** (or **Edit Credit Note** for credit notes).
+3. `editInvoiceOrNote(type)` validates that the document type in the selected row matches the action type, then calls `showInvoice(id, type)`.
+4. The modal loads the existing invoice via `getInvoice(id)` and pre-fills all fields including items and discounts.
+5. Make changes and click **Update**. `saveInvoice(data)` handles the update path, recalculating lot adjustments as deltas from the original quantities.
+
+## Deleting an Invoice
+
+<Warning>
+  Deleting an invoice permanently restores the inventory stock for all lots used in that invoice. This operation cannot be undone from the UI — once confirmed, the lot quantities in `irs_items` are incremented back and both the invoice header and all its line items are deleted from MySQL. The invoice Google Sheets file in Drive is **not** deleted.
+</Warning>
+
+`deleteInvoiceOrNote(type)` confirms the action via a prompt dialog, then calls `deleteInvoice(id)`:
+
+```javascript
+// Excerpt from invoice/backend.gs
+function deleteInvoice(id) {
+  var conn = Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  conn.setAutoCommit(false);
+
+  // Restore stock for each lot
+  var results = conn.createStatement()
+    .executeQuery("SELECT lot_id, qty FROM invoices_items WHERE invoice_id = " + id);
+  var items = [];
+  while (results.next()) {
+    items.push([results.getString(1), results.getString(2)]);
+  }
+  var stmt = conn.prepareStatement("UPDATE irs_items SET in_stock = in_stock + ? WHERE id = ?");
+  for (var i = 0; i < items.length; i++) {
+    stmt.setString(1, items[i][1]);
+    stmt.setString(2, items[i][0]);
+    stmt.addBatch();
+  }
+  stmt.executeBatch();
+
+  // Delete items and invoice record
+  conn.createStatement().execute("DELETE FROM invoices_items WHERE invoice_id = " + id);
+  conn.createStatement().execute("DELETE FROM invoices WHERE id = " + id);
+  conn.commit();
+  conn.close();
+
+  // Refresh Inventory and Invoices tabs
+  updateInventory();
+  updateInvoices();
+}
+```
+
+## Invoice Number Generation
+
+`getNextId()` reads the `AUTO_INCREMENT` value from `information_schema.tables` for the `invoices` table and returns it as a zero-padded 6-digit string (e.g. `"000042"`). This is called when opening a new invoice dialog and displayed in the **Invoice #** field.
+
+```javascript
+// Excerpt from invoice/backend.gs
+function getNextId() {
+  var conn = Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var results = conn.createStatement().executeQuery(
+    "SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_name = 'invoices'"
+  );
+  var id = 0;
+  if (results.next()) { id = results.getString(1); }
+  return JSON.stringify(("000000" + Number(id)).slice(-6));
+}
+```
+
+## Drive and Template Constants
+
+The invoice system uses three constants defined in `Constants.gs`:
+
+| Constant | Purpose |
+|----------|---------|
+| `InvoiceTemplate` | Drive file ID of the master invoice Google Sheets template |
+| `InvoiceFolder` | Drive folder ID where invoice spreadsheet copies are stored |
+| `CUSTOMERS_FOLDER` | Parent Drive folder ID under which customer subfolders live |
+
+Shortcuts to each invoice spreadsheet are placed in the customer's own Drive folder (`data.customer.folder`) for easy per-customer navigation.

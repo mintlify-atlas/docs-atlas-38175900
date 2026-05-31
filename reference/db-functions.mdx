@@ -1,0 +1,369 @@
+---
+title: "Database Helper Functions Reference"
+sidebarTitle: "DB Functions"
+description: "Low-level Apps Script JDBC helper functions for querying and writing data to MySQL, used internally by all feature modules."
+---
+
+The DB layer provides the raw JDBC plumbing that every feature module in Arsinous V8 Sales builds on. Rather than opening connections and iterating result sets in every individual function, the codebase centralises these patterns into a small set of helpers. `getFrom.gs` contains read-only query functions that return parsed results as arrays or JSON strings. `saveTo.gs` contains write functions — INSERT, UPDATE, DELETE — along with post-save sheet refresh calls to keep the spreadsheet in sync. The connection constants (`InstanceUrl`, `User`, `UserPwd`) are defined in `Constants.gs` and used by all functions here.
+
+---
+
+## `getFromDbAsArray(conn, query)`
+
+Executes a SQL SELECT statement on an existing connection and returns the results as an array of arrays. This is the lowest-level read primitive — it makes no assumptions about column names and returns raw string values.
+
+```javascript
+function getFromDbAsArray(conn, query) {
+  const output = [];
+  const stmt = conn.createStatement();
+  const results = stmt.executeQuery(query);
+  const numCols = results.getMetaData().getColumnCount();
+  while (results.next()) {
+    var line = [];
+    for (var col = 0; col < numCols; col++) {
+      line.push(results.getString(col + 1));
+    }
+    output.push(line.slice());
+  }
+  results.close();
+  return output;
+}
+```
+
+<ParamField path="conn" type="JdbcConnection">
+  An open JDBC connection. **This function does not close the connection** — the caller is responsible for closing it after use. This allows the function to be used mid-transaction or in a sequence of queries without incurring reconnection overhead.
+</ParamField>
+
+<ParamField path="query" type="string">
+  A complete SQL SELECT statement to execute.
+</ParamField>
+
+**Returns:** An array of arrays. Each inner array represents one result row, with values in column order as strings (JDBC's `getString` is used for every column type). Returns an empty array if the query produces no rows.
+
+<Note>
+  All values are returned as strings regardless of their MySQL column type. Callers that need numeric values must coerce them explicitly, e.g., `Number(row[0])` or `parseFloat(row[2])`.
+</Note>
+
+---
+
+## `getProductFromDB(id)`
+
+Fetches a single product record from the `products` table using a parameterised query.
+
+```javascript
+function getProductFromDB(id) {
+  var output = {};
+  var conn = Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.prepareStatement("SELECT * FROM products WHERE id = ?");
+  stmt.setObject(1, id);
+  var results = stmt.executeQuery();
+  var numCols = results.getMetaData().getColumnCount();
+  if (results.next()) {
+    for (var col = 0; col < numCols; col++) {
+      var header = results.getMetaData().getColumnName(col + 1);
+      output[header] = results.getString(col + 1);
+    }
+    results.close();
+    conn.close();
+    return JSON.stringify(output);
+  }
+  results.close();
+  conn.close();
+  throw new Error("No such product exist");
+}
+```
+
+<ParamField path="id" type="string | number">
+  The primary key of the product to retrieve.
+</ParamField>
+
+**Returns:** A JSON string representing the product as a plain object with MySQL column names as keys and string values. Example:
+
+```json
+{
+  "id": "12",
+  "code": "PRD-001",
+  "name": "Widget A",
+  "cat": "Hardware",
+  "vat_code": "3",
+  "cost": "4.50",
+  "price": "9.00",
+  "retail": "12.00",
+  "def_discount": "6+2,12+6",
+  "def_fixed_discount": "20"
+}
+```
+
+**Throws:** `Error("No such product exist")` if no row matches the provided `id`.
+
+<Note>
+  The error message contains a typo in the source: `"No such product exist"` (missing `"s"`). This is the literal string thrown, so error-handling code that matches on this message should use the exact string.
+</Note>
+
+---
+
+## `getItemsFromDB(id, table, col, conn)`
+
+Fetches all rows from a given table where a specified column equals the given value. Returns results as a JSON array of objects. Used by `getInvoice` to fetch both the `invoices` header and `invoices_items` rows.
+
+```javascript
+function getItemsFromDB(id, table, col, conn) {
+  var output = [];
+  conn = conn || Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var query = "SELECT * FROM " + table + " WHERE " + col + " = ?";
+  var stmt = conn.prepareStatement(query);
+  stmt.setObject(1, id);
+  var results = stmt.executeQuery();
+  var numCols = results.getMetaData().getColumnCount();
+  while (results.next()) {
+    var item = {};
+    for (var col = 0; col < numCols; col++) {
+      var header = results.getMetaData().getColumnName(col + 1);
+      item[header] = results.getString(col + 1);
+    }
+    output.push(JSON.parse(JSON.stringify(item)));
+  }
+  results.close();
+  conn.close();
+  return JSON.stringify(output);
+}
+```
+
+<ParamField path="id" type="string | number">
+  The value to match against `col`.
+</ParamField>
+
+<ParamField path="table" type="string">
+  The MySQL table name to query (e.g., `"invoices"`, `"invoices_items"`).
+</ParamField>
+
+<ParamField path="col" type="string">
+  The column name to filter on (e.g., `"id"`, `"invoice_id"`).
+</ParamField>
+
+<ParamField path="conn" type="JdbcConnection" optional>
+  An already-open JDBC connection to reuse. If not provided, a new connection is opened. The connection is **always closed** at the end of this function regardless of whether it was passed in or opened internally.
+</ParamField>
+
+**Returns:** A JSON string of an array of objects. Each object has MySQL column names as keys and string values. Returns `"[]"` if no rows match.
+
+<Warning>
+  `getItemsFromDB` always closes the connection it uses, even if one was passed in. Do not pass a connection that must remain open for subsequent operations.
+</Warning>
+
+---
+
+## `getAllFromDB(type, query, fullQuery)`
+
+General-purpose table fetch. Returns all matching rows as a JSON array of objects. Supports three query modes: full table fetch, appended WHERE clause, or fully custom query.
+
+```javascript
+function getAllFromDB(type, query, fullQuery) {
+  var output = [];
+  var conn = Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.createStatement();
+
+  if (query) {
+    query = "SELECT * FROM " + type + " " + query;
+  } else if (fullQuery) {
+    query = fullQuery;
+  } else {
+    query = "SELECT * FROM " + type;
+  }
+
+  var results = stmt.executeQuery(query);
+  var numCols = results.getMetaData().getColumnCount();
+  while (results.next()) {
+    var supplier = {};
+    for (var col = 0; col < numCols; col++) {
+      var header = results.getMetaData().getColumnName(col + 1);
+      supplier[header] = results.getString(col + 1);
+    }
+    output.push(JSON.parse(JSON.stringify(supplier)));
+  }
+  results.close();
+  conn.close();
+  return JSON.stringify(output);
+}
+```
+
+<ParamField path="type" type="string">
+  The MySQL table name. Used as the base of the generated query unless `fullQuery` is provided.
+</ParamField>
+
+<ParamField path="query" type="string" optional>
+  A WHERE clause or ORDER BY fragment to append to `SELECT * FROM <type>`. Example: `" WHERE in_stock > 0 "`. Takes precedence over `fullQuery` if both are provided.
+</ParamField>
+
+<ParamField path="fullQuery" type="string" optional>
+  A complete SQL statement that entirely replaces the default `SELECT * FROM <type>` query. Only used when `query` is falsy.
+</ParamField>
+
+**Returns:** A JSON string of an array of objects keyed by MySQL column name. Returns `"[]"` if no rows match.
+
+**Query mode priority:**
+1. If `query` is provided: `SELECT * FROM <type> <query>`
+2. Else if `fullQuery` is provided: `<fullQuery>`
+3. Otherwise: `SELECT * FROM <type>`
+
+---
+
+## `saveProductToDb(data)`
+
+Persists a product record to the `products` table (INSERT for new products, UPDATE for existing ones) and refreshes the Products sheet.
+
+```javascript
+function saveProductToDb(data) {
+  var conn = Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  conn.setAutoCommit(false);
+  data = JSON.parse(data);
+  if (data.id) {
+    // UPDATE products SET code=?, name=?, cat=?, vat_code=?, cost=?,
+    //   price=?, retail=?, def_discount=?, def_fixed_discount=? WHERE id=?
+  } else {
+    // INSERT INTO products (code, name, cat, vat_code, price, retail, def_discount, def_fixed_discount)
+  }
+  stmt.execute();
+  conn.commit();
+  updateProducts(conn);
+}
+```
+
+<ParamField path="data" type="string">
+  A JSON-encoded product object. When `data.id` is set, an UPDATE is issued for that product. When `data.id` is absent or falsy, a new product is INSERTed.
+
+  | Field | Type | Notes |
+  |-------|------|-------|
+  | `id` | string \| null | Set for updates; omit for inserts. |
+  | `code` | string | Product code/SKU. |
+  | `name` | string | Product display name. |
+  | `cat` | string | Product category. |
+  | `vat_code` | number | VAT code: `1` (0%), `2` (5%), `3` (19%). Defaults to `3`. |
+  | `cost` | number | Purchase cost. Non-numeric values are stored as `0`. |
+  | `price` | number | Selling price. Non-numeric values are stored as `0`. |
+  | `retail` | number | Retail/RRP price. Non-numeric values are stored as `0`. |
+  | `def_discount` | string | Default step discount string (e.g. `"6+2,12+6"`). |
+  | `def_fixed_discount` | number | Default fixed discount amount. Non-numeric values stored as `null`. |
+</ParamField>
+
+After committing, `updateProducts(conn)` is called with the same connection object to refresh the Products sheet. The connection is closed inside `updateProducts`.
+
+---
+
+## `saveCustomerToDb(data, id)`
+
+Persists a customer record to the `customers` table. For new customers, creates a Google Drive subfolder under `CUSTOMERS_FOLDER` before inserting the record. Refreshes the Customers sheet after saving.
+
+```javascript
+function saveCustomerToDb(data, id) {
+  var conn = Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  conn.setAutoCommit(false);
+  data = JSON.parse(data);
+  if (data.id) {
+    // UPDATE customers SET code=?, name=?, address=?, municipality=?,
+    //   city=?, zip=?, phone=?, details=?, folder=? WHERE id=?
+  } else {
+    if (!data.folder) {
+      data.folder = DriveApp.getFolderById(CUSTOMERS_FOLDER).createFolder(data.name).getId();
+    }
+    // INSERT INTO customers (code, name, address, municipality, city, zip, phone, details, folder)
+  }
+  stmt.execute();
+  conn.commit();
+  updateCustomers(conn);
+}
+```
+
+<ParamField path="data" type="string">
+  A JSON-encoded customer object.
+
+  | Field | Type | Notes |
+  |-------|------|-------|
+  | `id` | string \| null | Set for updates; omit for inserts. |
+  | `code` | string | Customer code/reference. |
+  | `name` | string | Customer display name. |
+  | `address` | string | Street address. |
+  | `municipality` | string | Municipality. |
+  | `city` | string | City. |
+  | `zip` | string | Postal code. |
+  | `phone` | string | Phone number. |
+  | `details` | string | Free-text details / address block (used in invoices). |
+  | `folder` | string | Google Drive folder ID. Auto-created for new customers if not supplied. |
+</ParamField>
+
+<ParamField path="id" type="string" optional>
+  Not used in the function body — the presence of `data.id` determines the INSERT vs UPDATE path. This parameter exists in the function signature but has no effect.
+</ParamField>
+
+**Drive folder creation:** For new customers without a pre-set `data.folder`, the function calls `DriveApp.getFolderById(CUSTOMERS_FOLDER).createFolder(data.name)` and stores the resulting folder ID in `data.folder` before the INSERT. The `CUSTOMERS_FOLDER` constant is defined in `Constants.gs`.
+
+After committing, `updateCustomers(conn)` is called to refresh the Customers sheet.
+
+---
+
+## `saveCustomerPaymentToDb(data)`
+
+Persists a customer payment record to `customers_payments` (INSERT or UPDATE) and refreshes the P&D sheet.
+
+```javascript
+function saveCustomerPaymentToDb(data) {
+  data = JSON.parse(data);
+  var conn = Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  if (data.id) {
+    // UPDATE customers_payments SET customer_id=?, type=?, date=?, amount=?,
+    //   comments=?, num=?, deposit_date=?, deposit_num=? WHERE id=?
+  } else {
+    // INSERT INTO customers_payments
+    //   (customer_id, type, date, amount, comments, num, deposit_date, deposit_num)
+  }
+  stmt.execute();
+  conn.close();
+  updateCustomersPayments();
+}
+```
+
+<ParamField path="data" type="string">
+  A JSON-encoded payment object.
+
+  | Field | Type | Notes |
+  |-------|------|-------|
+  | `id` | string \| null | Set for updates; omit for inserts. |
+  | `customer_id` | string | FK to `customers.id`. |
+  | `type` | string | Payment type label (e.g. `"Payment"`, `"Cheque"`). |
+  | `date` | string | Payment date in `YYYY-MM-DD` format. |
+  | `amount` | number | Payment amount (positive). |
+  | `comments` | string | Optional free-text comments. |
+  | `num` | string | Payment reference number. |
+  | `deposit_date` | string \| null | Bank deposit date, or `null` if not yet deposited. |
+  | `deposit_num` | string | Bank deposit reference number. |
+</ParamField>
+
+<Note>
+  `deposit_date` is stored as `NULL` in MySQL when `data.deposit_date` is falsy. For UPDATE statements, the function uses the SQL literal `NULL` (not a quoted string) when the value is absent: `,deposit_date = NULL`. For INSERT statements, `stmt.setObject(7, data.deposit_date || null)` achieves the same effect through JDBC's null handling.
+</Note>
+
+---
+
+## `deleteCustomerPayment(id, conn)`
+
+Deletes a single row from `customers_payments` by primary key.
+
+```javascript
+function deleteCustomerPayment(id, conn) {
+  conn = conn || Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.createStatement();
+  stmt.execute("DELETE FROM `customers_payments` WHERE `id` = " + id.toString() + ";");
+}
+```
+
+<ParamField path="id" type="string | number">
+  The primary key of the payment record to delete. The value is coerced to a string via `.toString()` before being interpolated into the SQL statement.
+</ParamField>
+
+<ParamField path="conn" type="JdbcConnection" optional>
+  An already-open JDBC connection. If not provided, a new connection is opened. **This function does not close the connection** — the caller is responsible for closing it.
+</ParamField>
+
+<Warning>
+  `deleteCustomerPayment` does not commit or close the connection. When called standalone (e.g., from `selectPaymentToDelete`), the JDBC connection is opened internally and left open without being closed. This is a minor resource leak in the source code — in practice, Apps Script's execution environment reclaims the connection when the script run ends. When called from within a transaction (i.e., with a shared `conn`), the caller must commit and close.
+</Warning>

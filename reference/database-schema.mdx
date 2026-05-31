@@ -1,0 +1,238 @@
+---
+title: "MySQL Database Schema for Arsinous V8 Sales"
+sidebarTitle: "Database Schema"
+description: "MySQL table structures inferred from the Arsinous V8 Sales Apps Script source, covering customers, products, invoices, inventory, payments, and discounts."
+---
+
+The Arsinous V8 Sales application communicates with a MySQL database entirely through Google Apps Script's JDBC service. Because no DDL or migration files are included in the repository, the schema documented here is reconstructed from the `INSERT`, `UPDATE`, and `SELECT` statements spread across `DB/saveTo.gs`, `DB/getFrom.gs`, `invoice/backend.gs`, `Customer/backend.gs`, `product/backend.gs`, `Payment/backend.gs`, `Discounts.gs`, `Updates.gs`, and `SoA.gs`. Each table section lists every column that appears in at least one SQL statement, along with its inferred type and purpose.
+
+<Note>
+  This schema is inferred from application source code — no DDL or migration files are included in the repository. Column types are approximations based on their usage in prepared statements, string concatenation, and `setObject` / `setString` calls. Treat them as a guide rather than a formal contract.
+</Note>
+
+<Tip>
+  The JDBC connection string in `Constants.gs` targets MySQL on port 3306. Any MySQL 5.x or later instance reachable at that address is compatible. The connection string also sets `useUnicode=yes&characterEncoding=UTF-8`, which is required for correct handling of accented characters in customer names and addresses.
+</Tip>
+
+---
+
+## `customers`
+
+Populated and queried by `saveCustomerToDb` (insert/update) and `updateCustomers` (`SELECT * FROM customers`). A new Google Drive sub-folder is created automatically under `CUSTOMERS_FOLDER` when a customer is inserted without a pre-existing `folder` value.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | `INT AUTO_INCREMENT` | Primary key. |
+| `code` | `VARCHAR` | Short customer identifier displayed on invoice headers. |
+| `name` | `VARCHAR` | Customer's full name. Used in all balance and SoA queries that JOIN to `customers`. |
+| `address` | `VARCHAR` | Street address. |
+| `municipality` | `VARCHAR` | Municipality or district. |
+| `city` | `VARCHAR` | City. |
+| `zip` | `VARCHAR` | Postal / ZIP code. |
+| `phone` | `VARCHAR` | Contact phone number. |
+| `details` | `VARCHAR` | Freeform text written to cell `J1` of the generated invoice Google Sheet (invoice header block). |
+| `folder` | `VARCHAR` | Google Drive folder ID for this customer's documents. Invoice shortcuts are placed here by `createInvoiceSs`. |
+
+```sql
+-- Insert (saveCustomerToDb)
+INSERT INTO customers
+  (code, name, address, municipality, city, zip, phone, details, folder)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- Update (saveCustomerToDb)
+UPDATE customers
+SET code = '...', name = '...', address = '...', municipality = '...',
+    city = '...', zip = '...', phone = '...', details = '...', folder = '...'
+WHERE id = <id>;
+```
+
+---
+
+## `products`
+
+Populated and queried by `saveProductToDb` (insert/update) and `updateProducts` (`SELECT * FROM products`). The `vat_code` column is a foreign reference to the `Vat` lookup object defined in `Constants.gs`.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | `INT AUTO_INCREMENT` | Primary key. |
+| `code` | `VARCHAR` | Product SKU or short code. Snapshotted into `invoices_items.code` at the time of sale. |
+| `name` | `VARCHAR` | Product display name. |
+| `cat` | `VARCHAR` | Product category. |
+| `vat_code` | `TINYINT` | VAT rate identifier: `1` = 0 %, `2` = 5 %, `3` = 19 % (default). See the `Vat` constant. |
+| `cost` | `DECIMAL` | Purchase / landed cost. Snapshotted into `invoices_items.cost` at the time of sale. |
+| `price` | `DECIMAL` | Standard selling price. |
+| `retail` | `DECIMAL` | Retail reference price (written to the invoice sheet for comparison). |
+| `def_discount` | `VARCHAR` | Default quantity-break discount pattern, e.g. `"6+2,12+6"` (buy 6 get 2 free; buy 12 get 6 free). |
+| `def_fixed_discount` | `DECIMAL` | Default flat discount percentage applied before the quantity-break calculation. |
+
+```sql
+-- Insert (saveProductToDb)
+INSERT INTO products
+  (code, name, cat, vat_code, price, retail, def_discount, def_fixed_discount)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+-- Update (saveProductToDb)
+UPDATE products
+SET code = '...', name = '...', cat = '...', vat_code = <n>,
+    cost = <n>, price = <n>, retail = <n>,
+    def_discount = '...', def_fixed_discount = <n>
+WHERE id = <id>;
+```
+
+---
+
+## `invoices`
+
+The central transaction table. Written by `saveInvoice` and read by `updateInvoices` (joined with `customers`), `updateAllBalances`, and `updateBalanceTab` (SoA).
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | `INT AUTO_INCREMENT` | Primary key. Returned via `RETURN_GENERATED_KEYS` immediately after insert so that line items can reference it. |
+| `type` | `VARCHAR` | Document type: `"invoice"` or `"credit note"`. Credit notes cause the invoice sheet header cell `A11` to read `"CREDIT NOTE"`. |
+| `customer_id` | `INT` | FK → `customers.id`. |
+| `date` | `DATE` | Invoice date (`YYYY-MM-DD`). Used in all date-range filters on the Invoices tab and SoA. |
+| `sp_id` | `INT` | Salesperson ID. FK to a salesperson/`sp` table (not directly written by the scripts in scope, but referenced in `saveInvoice` headers and written to invoice sheet cell `B8`). |
+| `name` | `VARCHAR` | Zero-padded 6-digit invoice number, e.g. `"000042"`. Generated from `AUTO_INCREMENT` via `getNextId()`. |
+| `total` | `DECIMAL` | Net subtotal before VAT. |
+| `vat` | `DECIMAL` | VAT amount. `total + vat` equals the gross invoice value used in balance calculations. |
+| `ss_id` | `VARCHAR` | Google Sheets file ID of the generated invoice document. Written after `createInvoiceSs` returns. |
+| `comments` | `VARCHAR` | Free-text comments. |
+| `cost` | `DECIMAL` | Total cost of goods on this invoice (sum of `invoices_items.cost × qty`). Used for margin reporting. |
+
+```sql
+-- Insert (saveInvoice)
+INSERT INTO invoices
+  (type, customer_id, date, sp_id, name, total, vat, ss_id, comments, cost)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- Update (saveInvoice — edit path)
+UPDATE invoices
+SET name = '...', customer_id = <n>, date = '...', total = <n>,
+    vat = <n>, ss_id = '...', comments = '...', cost = <n>
+WHERE id = <id>;
+```
+
+---
+
+## `invoices_items`
+
+One row per line item on an invoice. Written in batch by `saveInvoice` after the parent `invoices` row is committed. When an invoice is edited, all existing line items are deleted and re-inserted.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | `INT AUTO_INCREMENT` | Primary key. |
+| `invoice_id` | `INT` | FK → `invoices.id`. |
+| `product_id` | `INT` | FK → `products.id`. |
+| `lot_id` | `INT` | FK → `irs_items.id`. The specific inventory lot from which stock is deducted. |
+| `qty` | `DECIMAL` | Quantity sold. Added to (or subtracted from) `irs_items.in_stock` atomically with the invoice save. |
+| `price` | `DECIMAL` | Unit selling price at the time of the sale. |
+| `discount` | `VARCHAR` | Quantity-break discount string applied on this line (e.g. `"6+2"`). |
+| `fixed_discount` | `DECIMAL` | Fixed percentage discount applied before the quantity-break calculation. |
+| `manual_discount` | `VARCHAR` | Any discount entered manually by the user at the time of invoicing. |
+| `code` | `VARCHAR` | Snapshot of `products.code` at the time of sale, preserved for historical accuracy. |
+| `cost` | `DECIMAL` | Snapshot of `products.cost` (or `irs_items.cost`) at the time of sale. |
+| `priceAfterDiscount` | `DECIMAL` | Final unit price after all discount tiers have been applied. |
+
+```sql
+-- Insert (saveInvoice — batch)
+INSERT INTO invoices_items
+  (invoice_id, product_id, lot_id, qty, price, discount,
+   fixed_discount, manual_discount, code, cost, priceAfterDiscount)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+```
+
+---
+
+## `customers_payments`
+
+Records cash receipts and bank transfers against a customer. Written by `saveCustomerPaymentToDb` and queried by `updateCustomersPayments` (P&D tab) and the SoA / balance scripts. Payments are stored as positive amounts; the balance queries negate them when computing the outstanding balance.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | `INT AUTO_INCREMENT` | Primary key. |
+| `customer_id` | `INT` | FK → `customers.id`. |
+| `type` | `VARCHAR` | Payment method label, e.g. `"Cash"`, `"Bank Transfer"`. |
+| `date` | `DATE` | Date the payment was received (`YYYY-MM-DD`). |
+| `amount` | `DECIMAL` | Payment amount. Stored as a positive value; subtracted from the running balance in all aggregate queries. |
+| `comments` | `VARCHAR` | Free-text notes. |
+| `num` | `VARCHAR` | Payment reference number (e.g. cheque number, transfer reference). |
+| `deposit_date` | `DATE` | Date the payment was physically deposited to the bank account. `NULL` until deposited. Used by the "Payments w/o Deposits" filter on the P&D tab. |
+| `deposit_num` | `VARCHAR` | Deposit slip reference number. |
+
+```sql
+-- Insert (saveCustomerPaymentToDb)
+INSERT INTO customers_payments
+  (customer_id, type, date, amount, comments, num, deposit_date, deposit_num)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+-- Update (saveCustomerPaymentToDb)
+UPDATE customers_payments
+SET customer_id = '...', type = '...', date = '...', amount = '...',
+    comments = '...', num = '...', deposit_date = <date|NULL>, deposit_num = '...'
+WHERE id = <id>;
+```
+
+---
+
+## `discounts`
+
+Per-customer discount overrides for individual products. The entire set for a given customer is deleted and re-inserted atomically by `saveDiscounts`. When `getDiscounts` fetches the Discounts tab it LEFT JOINs this table against `products`, so products without a customer override still appear with their default discount values.
+
+| Column | Type | Description |
+|---|---|---|
+| `product_id` | `INT` | FK → `products.id`. Part of the composite primary key. |
+| `customer_id` | `INT` | FK → `customers.id`. Part of the composite primary key. |
+| `discount` | `VARCHAR` | Customer-specific quantity-break discount override string (replaces `products.def_discount` for this customer). |
+| `fixed_discount` | `DECIMAL` | Customer-specific flat discount override percentage (replaces `products.def_fixed_discount` for this customer). |
+
+```sql
+-- Overwrite all discounts for a customer (saveDiscounts)
+DELETE FROM discounts WHERE customer_id = <id>;
+
+INSERT INTO discounts (product_id, customer_id, discount, fixed_discount)
+VALUES (?, ?, ?, ?);
+```
+
+---
+
+## `irs_items`
+
+The inventory lot table. Each row represents a discrete purchase lot (batch) for a product, with its own expiry date and cost. The `in_stock` column is decremented when an invoice is saved and incremented when an invoice is deleted, always within the same JDBC transaction.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | `INT AUTO_INCREMENT` | Primary key. Referenced as `lot_id` in `invoices_items`. |
+| `product_id` | `INT` | FK → `products.id`. |
+| `lot` | `VARCHAR` | Lot / batch identifier (e.g. manufacturer batch number). Shown in the Inventory sheet alongside the expiry date. |
+| `exp_date` | `DATE` | Expiry date of this lot. Written to the invoice Google Sheet in the line-item rows. |
+| `in_stock` | `DECIMAL` | Current quantity available in this lot. Filtered with `WHERE in_stock > 0` in `updateInventory`. |
+| `cost` | `DECIMAL` | Purchase cost for this lot. |
+| `final_cost` | `DECIMAL` | Final landed cost after any additional charges (freight, duties, etc.). |
+
+```sql
+-- Deduct stock on invoice save (saveInvoice — batch)
+UPDATE irs_items SET in_stock = in_stock - ? WHERE id = ?;
+
+-- Restore stock on invoice delete (deleteInvoice — batch)
+UPDATE irs_items SET in_stock = in_stock + ? WHERE id = ?;
+
+-- Read for Inventory tab (updateInventory)
+SELECT * FROM irs_items WHERE in_stock > 0;
+```
+
+---
+
+## `pos_items`
+
+Purchase-order items representing stock that has been ordered but not yet received. Used exclusively by `updateInventory` to populate the "ordered (PO)" column on the Inventory sheet.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | `INT AUTO_INCREMENT` | Primary key. |
+| `product_id` | `INT` | FK → `products.id`. |
+| `quantity` | `DECIMAL` | Quantity on open purchase order. Filtered with `WHERE quantity > 0` in `updateInventory`. |
+
+```sql
+-- Read for Inventory tab (updateInventory)
+SELECT * FROM pos_items WHERE quantity > 0;
+```

@@ -1,0 +1,245 @@
+---
+title: "Statement of Account: Customer Balance Sheet"
+sidebarTitle: "Balance"
+description: "View a full transaction history and running balance for any customer, combining invoices and payments ordered by date in the Balance tab."
+---
+
+The **Balance** sheet is the primary customer ledger view in Arsinous V8 Sales. It pulls every invoice and payment for a selected customer directly from MySQL, merges them into a single chronological list, and uses a running balance formula to show the net position at each row — giving you a clear, date-ordered audit trail without leaving the spreadsheet.
+
+## Selecting a Customer
+
+To load a customer's history, type or select the customer's name in **cell A1** of the Balance sheet. An `onEdit` trigger fires automatically as soon as A1 changes and calls `showTransactions()`.
+
+```javascript
+// onEdit.gs — trigger wired to cell A1 on the Balance sheet
+function onEdit(e) {
+  var sh = SpreadsheetApp.getActiveSheet();
+  var shName = sh.getName();
+
+  switch (shName) {
+    case "Balance":
+      if (e.range.getA1Notation() == "A1") {
+        showTransactions();
+      }
+      break;
+  }
+}
+```
+
+<Note>
+The name in A1 must match the `name` field in the `customers` MySQL table exactly (case-sensitive lookup). If the name cannot be found, `showTransactions()` will throw `"Cannot find '<name>'"`.
+</Note>
+
+## How `showTransactions()` Works
+
+`showTransactions()` builds the full, unfiltered transaction history for the selected customer. It performs the following steps every time A1 is edited:
+
+<Steps>
+  <Step title="Activate the Balance sheet and clear previous data">
+    The function activates the Balance sheet and clears the range **A3:H**, then writes `"Updating...."` to A3 while the data loads.
+  </Step>
+  <Step title="Look up the customer in MySQL">
+    It reads the name from A1 and fetches all rows from the `customers` table. It filters by an exact name match to retrieve the customer's `id`.
+  </Step>
+  <Step title="Fetch invoices and payments for that customer">
+    Two separate queries run against MySQL:
+    - **Invoices** — all rows from `invoices WHERE customer_id = <id>`
+    - **Payments** — all rows from `customers_payments WHERE customer_id = <id>`
+  </Step>
+  <Step title="Map to a common row format and merge">
+    Each result set is mapped to the eight-column format and then concatenated into a single array.
+  </Step>
+  <Step title="Sort by date and write to the sheet">
+    The merged array is sorted ascending by the `date` field (string comparison). A header row is prepended, and the full output is written starting at **row 3**.
+  </Step>
+</Steps>
+
+```javascript
+// sidebar/backend.gs — showTransactions()
+function showTransactions() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName("Balance");
+  sh.activate();
+
+  sh.getRange("A3:H").clearContent();
+  sh.getRange("A3").setValue("Updating....");
+
+  var customerName = sh.getRange("A1").getValue();
+  if (customerName == "") { throw ("Select Customer"); }
+
+  var customers = JSON.parse(getAllFromDB('customers'));
+  var customer = customers.filter(function (v) { return v.name == customerName; })[0];
+  if (!customer) { throw ("Cannot find '" + customerName + "'"); }
+
+  var invoices = JSON.parse(getAllFromDB('invoices', " WHERE customer_id = " + customer.id));
+  var payments = JSON.parse(getAllFromDB('customers_payments', " WHERE customer_id = " + customer.id));
+
+  var headers = ["Id", "Date", "Type", "Name", "Amount", "VAT", "Total", "Comment"];
+
+  invoices = invoices.map(function (v) {
+    return [v.id, v.date, v.type, v.name, v.total, v.vat,
+            parseFloat(v.total) + parseFloat(v.vat),
+            v.comments == "null" ? "" : v.comments];
+  });
+
+  payments = payments.map(function (v) {
+    return [v.id, v.date, v.type, v.num, '', '', -v.amount,
+            v.comments == "null" ? "" : v.comments];
+  });
+
+  var output = invoices.concat(payments);
+  output.sort(function (a, b) {
+    if (a[1] > b[1]) return 1;
+    if (a[1] < b[1]) return -1;
+    return 0;
+  });
+
+  output.unshift(headers);
+  sh.getRange(3, 1, output.length, output[0].length).setValues(output);
+}
+```
+
+## Balance Sheet Columns
+
+The sheet is written starting at row 3, with a header row followed by data rows. The table below maps each column to its data source.
+
+| Column | Header  | Invoice Source                         | Payment Source                      |
+|--------|---------|----------------------------------------|-------------------------------------|
+| A      | Id      | `invoices.id`                          | `customers_payments.id`             |
+| B      | Date    | `invoices.date`                        | `customers_payments.date`           |
+| C      | Type    | `invoices.type` (e.g. `"invoice"`, `"credit note"`) | `invoices.type` (e.g. `"Payment"`) |
+| D      | Name    | `invoices.name`                        | `customers_payments.num`            |
+| E      | Amount  | `invoices.total`                       | *(blank)*                           |
+| F      | VAT     | `invoices.vat`                         | *(blank)*                           |
+| G      | Total   | `invoices.total + invoices.vat`        | `-customers_payments.amount`        |
+| H      | Comment | `invoices.comments`                    | `customers_payments.comments`       |
+
+<Note>
+Payments are stored as **positive** amounts in MySQL but are written to column G as **negative values** (`-v.amount`). This means a payment reduces the running balance, which is the expected accounting behaviour.
+</Note>
+
+## Running Balance Formula
+
+Column G (`Total`) is designed to work with the `runningBallance` custom formula, which produces a cumulative running total across all rows. Enter it in a helper column adjacent to column G:
+
+```
+=runningBallance(G4:G)
+```
+
+The function trims trailing empty rows, then uses `Array.reduce` to compute the cumulative sum at each position and returns the result as an array spilled into the sheet.
+
+```javascript
+// Formulas.gs — runningBallance()
+function runningBallance(amounts) {
+  if (amounts[0]) {
+    while (amounts[amounts.length - 1] == "") { amounts.pop(); }
+    if (amounts[0]) {
+      return amounts.map(function (row, index) {
+        var total = amounts.slice(0, index + 1)
+          .reduce(function (total, num) {
+            if (isNaN(num[0])) { num[0] = 0; }
+            return total + Number(num[0]);
+          }, 0);
+        return total;
+      });
+    }
+  }
+}
+```
+
+<Note>
+The function name is spelled **`runningBallance`** (double-L) in the source code. Use this exact spelling when entering the formula in the sheet.
+</Note>
+
+## Statement of Account with Date Range
+
+`showTransactions()` always loads the customer's **complete** history with no date filter. For a formal Statement of Account scoped to a specific date range — complete with an opening balance — use `updateBalanceTab()` from the **SoA Inputs** sheet instead.
+
+<Note>
+`showTransactions()` is a quick full-history view triggered by selecting a customer in A1 on the Balance sheet. `updateBalanceTab()` (SoA Inputs sheet) supports a start date, end date, and computes an opening balance for any transactions that occurred before the period — making it suitable for printing and sharing a formal Statement of Account with customers.
+</Note>
+
+`updateBalanceTab()` reads its inputs from the **SoA Inputs** sheet:
+
+| Cell | Input         | Description                                   |
+|------|---------------|-----------------------------------------------|
+| C1   | `startDate`   | Period start date; leave blank for all history |
+| C2   | `endDate`     | Period end date; leave blank for open end      |
+| F1   | `customerId`  | Numeric MySQL customer ID                      |
+
+When `startDate` is provided, the function first calculates an **opening balance** — the net of all invoices and payments that fall *before* that date — and writes it to **B5**:
+
+```sql
+SELECT SUM(amount) FROM (
+  SELECT COALESCE(SUM(total) + SUM(vat), 0) AS amount
+    FROM invoices
+   WHERE customer_id = <customerId> AND date < '<startDate>'
+  UNION ALL
+  SELECT COALESCE(-SUM(amount), 0) AS amount
+    FROM customers_payments
+   WHERE customer_id = <customerId> AND date < '<startDate>'
+) as a
+```
+
+The main query then builds a filtered UNION of invoices and payments for the selected period, ordered by date, and writes the results from **row 11**:
+
+```sql
+SELECT * FROM (
+  SELECT date, type, name, total + vat AS amount
+    FROM invoices
+   WHERE customer_id = <customerId>
+     AND date >= '<startDate>'
+     AND date <= '<endDate>'
+  UNION ALL
+  SELECT date, type, num, -amount AS amount
+    FROM customers_payments
+   WHERE customer_id = <customerId>
+     AND date >= '<startDate>'
+     AND date <= '<endDate>'
+) as a
+ORDER BY date
+```
+
+## Editing Documents from the Balance Sheet
+
+You can open an invoice or credit note for editing directly from any row on the Balance sheet.
+
+<Steps>
+  <Step title="Select the row">
+    Click any cell in the row containing the document you want to edit. The **Type** column (C) must contain `"invoice"` or `"credit note"`.
+  </Step>
+  <Step title="Open Edit Invoice or Edit Credit Note">
+    Use the **Arsinous** menu or the sidebar and choose **Edit Invoice** or **Edit Credit Note**. This calls `editInvoiceOrNote(type)`.
+  </Step>
+  <Step title="Confirm the document type">
+    The function reads the type from column C and validates it matches the selected action. If the types do not match, an error is shown.
+  </Step>
+</Steps>
+
+```javascript
+// sidebar/backend.gs — editInvoiceOrNote()
+function editInvoiceOrNote(type) {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var shName = sh.getName();
+  var row = sh.getActiveCell().getRow();
+  var id = sh.getRange(row, 1).getValue();
+
+  // On the Balance sheet, Type is in column 3 (C)
+  var typeCol = 3;
+
+  var doc_type = sh.getRange(row, typeCol).getValue();
+  if (doc_type != type) {
+    throw new Error("Selected document is " + doc_type + " but not " + type);
+  }
+  showInvoice(id, type);
+}
+```
+
+## Editing and Deleting Payments from the Balance Sheet
+
+To edit or delete a payment, select any cell in a row where the **Type** column (C) shows `"Payment"`, then use the Arsinous menu or sidebar to choose **Edit Payment** (`selectPaymentToEdit()`) or **Delete Payment** (`selectPaymentToDelete()`).
+
+<Warning>
+Deleting a payment is permanent and removes the record from MySQL. A confirmation dialog will appear before the deletion is processed. This action cannot be undone from the sheet.
+</Warning>

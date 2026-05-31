@@ -1,0 +1,128 @@
+---
+title: "Arsinous V8 Sales: Google Sheets Sales Platform"
+sidebarTitle: "Introduction"
+description: "Arsinous V8 Sales is a Google Apps Script system connecting Google Sheets to MySQL for end-to-end sales management across customers, invoices, and inventory."
+---
+
+Arsinous V8 Sales turns a standard Google Spreadsheet into a full-featured sales back-office. It connects directly to your MySQL database via Google's JDBC service, surfaces rich modal dialogs built with Vue.js and Vuetify, and keeps every sheet tab in sync with a single menu click or cell edit — all without leaving Google Workspace.
+
+## What It Solves
+
+Sales teams working inside Google Workspace need more than a static spreadsheet. Arsinous V8 Sales brings together customer records, invoices, inventory lots, payment tracking, discount schedules, and financial reports in one coherent environment. Data is always read from and written back to MySQL, so the spreadsheet is a live view rather than a disconnected copy.
+
+## Key Modules
+
+| Module | Description |
+|---|---|
+| **Customers** | Create, search, and update customer records. Auto-provisions a Drive sub-folder for each new customer. |
+| **Products** | Manage the product catalog with VAT codes, pricing tiers, and default discount structures. |
+| **Invoices** | Generate, view, edit, and delete invoices and credit notes within a chosen date range. |
+| **Inventory** | Track stock levels, lot numbers, and expiry dates pulled from MySQL. |
+| **Payments & Deposits** | Log and filter customer payments and deposits against a date range and customer filter. |
+| **Discounts** | View and save per-customer, per-product discount rules directly on the Discounts sheet. |
+| **Financial Reports** | Statement of Account (Balance tab) and all-customer outstanding balances (All Balances tab). |
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                  Google Spreadsheet                      │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐  │
+│  │ Sheet Tabs  │  │  Apps Script │  │ HTML Dialogs   │  │
+│  │  (9 tabs)   │◄─│  .gs files   │◄─│ Vue + Vuetify  │  │
+│  └─────────────┘  └──────┬───────┘  └────────────────┘  │
+└─────────────────────────┼────────────────────────────────┘
+                           │ JDBC (port 3306)
+                    ┌──────▼───────┐
+                    │  MySQL DB    │
+                    └──────────────┘
+```
+
+**Apps Script backend** — All server-side logic lives in `.gs` files organised by domain (`Customer/`, `product/`, `invoice/`, `Payment/`, `DB/`, `sidebar/`, plus root-level utility scripts). Google Apps Script executes these files server-side in V8 (see [Setup](/setup) for the current runtime note).
+
+**HTML modal dialogs** — Each domain has a matching `index.html` file rendered as a sidebar or modal dialog using `HtmlService`. The UI is built with Vue.js and Vuetify, communicating with the backend through `google.script.run`.
+
+**JDBC MySQL connection** — All database reads and writes go through `Jdbc.getConnection()` using the connection string configured in `Constants.gs`. Google's JDBC service bridges Apps Script to your MySQL server over port 3306.
+
+## Automatic Triggers
+
+### `onOpen` — Sidebar & Menu
+
+Every time the spreadsheet is opened, `onOpen` fires and does two things:
+
+1. Registers the **Arsinous** top-level menu with items for the Sidebar, Update Current Tab, and Discount sync actions.
+2. Automatically opens the Arsinous **sidebar** (when auth mode is not `NONE`, i.e., the user has already granted permissions).
+
+```javascript onOpen.gs
+function onOpen(e) {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu("Arsinous")
+    .addItem("Sidebar", "showSidebar")
+    .addItem("Update Current Tab", "updateCurrentTab")
+    .addSeparator()
+    .addItem("GET Discounts", "getDiscounts")
+    .addItem("SAVE Discounts", "saveDiscounts")
+    .addToUi();
+
+  if (e && e.authMode != ScriptApp.AuthMode.NONE) {
+    showSidebar();
+  }
+}
+```
+
+### `onEdit` — Auto-Refresh on Cell Change
+
+The `onEdit` trigger watches three sheet tabs and fires a data refresh when specific trigger cells are edited:
+
+| Sheet | Trigger Cell(s) | Action |
+|---|---|---|
+| **Discounts** | `A1` | Fetches discount rules from MySQL |
+| **Balance** | `A1` | Loads the Statement of Account for the named customer |
+| **P&D** | `C1`, `C2`, `E1`, `C4` | Refreshes the Payments & Deposits filtered view |
+
+## Sheet Tabs
+
+The spreadsheet is organised into nine dedicated tabs:
+
+| Tab | Purpose |
+|---|---|
+| Customers | Customer list synced from MySQL |
+| Products | Product catalog synced from MySQL |
+| Invoices | Invoice list for the selected date range |
+| Inventory | Stock levels with lots and expiry dates |
+| Discounts | Per-customer product discounts |
+| Balance | Statement of Account for one customer |
+| All Balances | Outstanding balances for all customers |
+| P&D | Payments & Deposits filtered view |
+| SoA Inputs | Inputs driving the Statement of Account query |
+
+## Runtime
+
+Arsinous V8 Sales targets the **Google Apps Script V8 runtime** (Chrome V8 engine), enabling modern JavaScript syntax throughout the codebase. See the [Setup guide](/setup) for the current `appsscript.json` runtime status and migration note.
+
+<Note>
+  Arsinous V8 Sales requires a **Google Workspace** account (free @gmail.com accounts cannot use certain Apps Script services such as `HtmlService` sidebar widths or advanced Drive features). Your MySQL server must also be publicly reachable on **port 3306** from Google's server infrastructure — private or firewalled databases require a tunnel or allowlist.
+</Note>
+
+## Explore the System
+
+<CardGroup cols={2}>
+  <Card title="Customers" icon="users" href="/features/customers">
+    Create and manage customer records, Drive folders, and discount assignments.
+  </Card>
+  <Card title="Invoices" icon="file-invoice" href="/features/invoices">
+    Generate, edit, and delete invoices and credit notes backed by MySQL.
+  </Card>
+  <Card title="Inventory" icon="boxes-stacked" href="/features/inventory">
+    Track stock lots, quantities, and expiry dates in real time.
+  </Card>
+  <Card title="Payments" icon="credit-card" href="/features/payments">
+    Log customer payments and deposits, filter by date and customer.
+  </Card>
+  <Card title="Balance Reports" icon="chart-line" href="/reports/balance">
+    Statement of Account and all-customer outstanding balance views.
+  </Card>
+  <Card title="Sidebar Overview" icon="sidebar" href="/sidebar/overview">
+    The Arsinous sidebar — your central hub for navigation and data entry.
+  </Card>
+</CardGroup>

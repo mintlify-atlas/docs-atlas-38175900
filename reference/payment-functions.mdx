@@ -1,0 +1,189 @@
+---
+title: "Payment Script Functions Reference"
+sidebarTitle: "Payment Functions"
+description: "Apps Script functions for creating, editing, and deleting customer payments in the customers_payments MySQL table."
+---
+
+The payment module records money received from customers — including cheque payments, bank transfers, and deposits. Each payment row in the MySQL `customers_payments` table carries an optional deposit date and deposit reference number, which lets the **P&D** (Payments & Deposits) sheet filter for undeposited versus deposited payments. The functions here cover the dialog entry points, sheet-level row selectors for edit and delete, and the query-driven refresh of the P&D sheet. Persistent changes are handled by [`saveCustomerPaymentToDb`](/reference/db-functions#savecustomerpaymenttodb) and [`deleteCustomerPayment`](/reference/db-functions#deletecustomerpayment) in the DB layer.
+
+---
+
+## `showPayment(id)`
+
+Opens an **800 × 350** modal dialog rendered from the `Payment/index` HTML template.
+
+```javascript
+function showPayment(id) {
+  var html = HtmlService.createTemplateFromFile("Payment/index");
+  var title;
+  if (id) {
+    html.id = id;
+    title = "Edit Customer Payment";
+  } else {
+    html.id = "";
+    title = "Create Customer Payment";
+  }
+  html = html.evaluate();
+  html.addMetaTag('viewport', '...');
+  html.setWidth(800).setHeight(350);
+  SpreadsheetApp.getUi().showModalDialog(html, title);
+}
+```
+
+<ParamField path="id" type="string | number" optional>
+  The `customers_payments` primary key to edit. When provided, the dialog sets `html.id = id` and titles itself **"Edit Customer Payment"**, loading the existing record on the front-end. When `null` or omitted, the dialog opens with an empty form titled **"Create Customer Payment"** and `html.id` is set to the empty string.
+</ParamField>
+
+---
+
+## `selectPaymentToEdit()`
+
+Reads the currently selected row from the **Balance** or **P&D** sheet and opens the payment edit dialog for the payment found on that row.
+
+**Validation rules — at least one of the following conditions must be met:**
+
+| Sheet | Row condition | Column A | Column C (type) |
+|-------|--------------|----------|-----------------|
+| `"Balance"` | row ≥ 4 | non-empty (the payment id) | must equal `"Payment"` |
+| `"P&D"` | row ≥ 7 | non-empty | any value |
+
+If neither condition is satisfied, the function throws `'Select Payment from "Balance" or "P&D" tabs '`.
+
+```javascript
+function selectPaymentToEdit() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var shName = sh.getName();
+  var row = sh.getActiveCell().getRow();
+  var rowData = sh.getRange(row + ":" + row).getDisplayValues()[0];
+  var id = rowData[0];
+  var type = rowData[2];
+
+  if (shName == "Balance" && type == "Payment" && row >= 4 && id != "") {
+    var amount = rowData[4];
+  } else if (shName == "P&D" && row >= 7 && id != "") {
+    var amount = rowData[6];
+  } else {
+    throw('Select Payment from "Balance" or "P&D" tabs ');
+  }
+  showPayment(id);
+}
+```
+
+<Note>
+  The `amount` variable is read for both sheet cases but is not used after assignment — it exists in the source as a guard expression that implicitly confirms the row has the expected shape. The actual editing is done entirely by `showPayment(id)`.
+</Note>
+
+---
+
+## `selectPaymentToDelete()`
+
+Reads the currently selected row from the **Customer** sheet, shows a confirmation dialog with the payment's date and amount, and — if confirmed — deletes the payment and refreshes the P&D sheet.
+
+**Validation rules (throws on failure):**
+1. Active sheet name must be `"Customer"`.
+2. Column C (type) of the selected row must equal `"Payment"`.
+3. Row must be ≥ 4.
+
+```javascript
+function selectPaymentToDelete() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var shName = sh.getName();
+  var row = sh.getActiveCell().getRow();
+  var rowData = sh.getRange(row + ":" + row).getDisplayValues()[0];
+  var id = rowData[0];
+  var date = rowData[1];
+  var type = rowData[2];
+  var amount = rowData[4];
+  if (shName != "Customer" || type != "Payment" || row < 4) {
+    throw('Select Payment from "Customer" tab');
+  } else {
+    var ui = SpreadsheetApp.getUi();
+    var response = ui.alert(
+      'Are you sure you want to delete ' + type + ' for ' + date + ' amounted ' + amount + '?',
+      ui.ButtonSet.YES_NO
+    );
+    if (response == ui.Button.YES) {
+      deleteCustomerPayment(id);
+      updateCustomersPayments();
+    } else {
+      ss.toast("Operation canceled");
+    }
+  }
+}
+```
+
+The confirmation dialog includes the payment `type`, `date`, and `amount` from the selected row so the user can verify the correct record before deletion. If the user clicks **NO**, a toast confirms the operation was cancelled and nothing is changed.
+
+<Warning>
+  Deletion via `selectPaymentToDelete` is permanent. There is no undo. The function calls `deleteCustomerPayment(id)` (which issues a `DELETE` SQL statement) before calling `updateCustomersPayments()` to refresh the P&D sheet.
+</Warning>
+
+---
+
+## `updateCustomersPayments()`
+
+Refreshes the **P&D** (Payments & Deposits) sheet by querying `customers_payments` with optional filters for date range, payment type, and customer.
+
+```javascript
+function updateCustomersPayments() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName("P&D");
+  var data = sh.getDataRange().getValues();
+  sh.getRange("A7:H").clearContent();
+  var startDate = data[0][2]; // C1
+  var endDate   = data[1][2]; // C2
+  var type      = data[0][4]; // E1
+  var customer  = data[3][5]; // F4
+  // ... builds and executes query ...
+  sh.getRange(7, 1, output.length, output[0].length).setValues(output);
+  ss.toast("P&D tab is updated");
+  sh.activate();
+}
+```
+
+**Filter inputs** are read directly from the P&D sheet cells before clearing data:
+
+| Cell | Variable | Purpose |
+|------|----------|---------|
+| `C1` | `startDate` | Start of the date range (inclusive) |
+| `C2` | `endDate` | End of the date range (inclusive) |
+| `E1` | `type` | Payment type filter (see below) |
+| `F4` | `customer` | Customer ID filter; empty string = all customers |
+
+**Type filter logic:**
+
+| `type` cell value | SQL condition added |
+|---|---|
+| `"Payments w/o Deposits"` | `AND deposit_date IS NULL` |
+| `"Payments with Deposits"` | `AND deposit_date IS NOT NULL` |
+| Any other value (including blank) | No deposit filter |
+
+**Date filter:** When `startDate` or `endDate` is non-empty, the value is formatted with `Utilities.formatDate(..., "yyyy-MM-dd")` before being interpolated into the SQL string. This ensures the sheet's locale-formatted dates are correctly converted to MySQL date literals.
+
+**Base query:**
+
+```sql
+SELECT
+  customers_payments.id,
+  date,
+  customers.name,
+  num,
+  deposit_date,
+  deposit_num,
+  amount,
+  comments
+FROM customers_payments
+LEFT JOIN customers ON customers_payments.customer_id = customers.id
+WHERE customer_id = '<customer>' -- or IS NOT NULL when no customer filter
+  [AND deposit_date IS NULL | IS NOT NULL]
+  [AND date >= '<startDate>']
+  [AND date <= '<endDate>']
+```
+
+Results are written to the P&D sheet starting at **row 7**, sorted by date descending (applied in Apps Script after the fetch). The columns written are: `id`, `date`, `name`, `num`, `deposit_date`, `deposit_num`, `amount`, `comments`.
+
+<Note>
+  The `updateCustomersPayments` function is also triggered automatically by the `onEdit` trigger whenever cells `C1`, `C2`, `E1`, or `C4` on the P&D sheet are edited. This means changing any filter input in the sheet refreshes the data immediately without needing to use the menu.
+</Note>

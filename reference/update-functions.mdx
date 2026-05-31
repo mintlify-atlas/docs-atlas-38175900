@@ -1,0 +1,527 @@
+---
+title: "Tab Update and Utility Functions Reference"
+sidebarTitle: "Update Functions"
+description: "Apps Script functions for refreshing sheet tabs, managing date ranges, computing running balances, and the onOpen/onEdit triggers."
+---
+
+This reference covers the cross-cutting utility functions that tie Arsinous V8 Sales together: the `onOpen` and `onEdit` spreadsheet triggers, the sidebar and user-property helpers, the generic tab router `updateCurrentTab`, date-range logic used by every query-driven refresh, the **All Balances** and **Balance** tab writers, inventory sync, and the two custom Sheets formulas for running balance and accounts receivable aging. These functions live across `Updates.gs`, `Formulas.gs`, `SoA.gs`, `onOpen.gs`, `onEdit.gs`, and `sidebar/backend.gs`.
+
+---
+
+## `onOpen(e)`
+
+**Trigger — runs automatically when the spreadsheet is opened.**
+
+Creates the **Arsinous** custom menu in the spreadsheet UI and, when the script has full auth, auto-opens the sidebar.
+
+```javascript
+function onOpen(e) {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu("Arsinous")
+    .addItem("Sidebar", "showSidebar")
+    .addItem("Update Current Tab", "updateCurrentTab")
+    .addSeparator()
+    .addItem("GET Discouts", "getDiscounts")
+    .addItem("SAVE Discouts", "saveDiscounts")
+    .addToUi();
+
+  if (e && e.authMode != ScriptApp.AuthMode.NONE) {
+    showSidebar();
+  }
+}
+```
+
+**Menu items created:**
+
+| Label | Function called |
+|-------|----------------|
+| Sidebar | `showSidebar` |
+| Update Current Tab | `updateCurrentTab` |
+| *(separator)* | — |
+| GET Discouts | `getDiscounts` |
+| SAVE Discouts | `saveDiscounts` |
+
+<Note>
+  The menu item labels "GET Discouts" and "SAVE Discouts" contain a typo in the source (`Discouts` instead of `Discounts`). These are the exact strings that appear in the Arsinous menu.
+</Note>
+
+<Note>
+  The sidebar is opened automatically only when `e.authMode != ScriptApp.AuthMode.NONE` — that is, when the script is running with at least limited authorization. In `LIMITED` or `NONE` mode (e.g., in an unbound script context), the sidebar call is skipped.
+</Note>
+
+---
+
+## `onEdit(e)`
+
+**Trigger — runs automatically on any cell edit.**
+
+Routes edits to the appropriate update function based on the sheet name and the edited cell's A1 notation.
+
+```javascript
+function onEdit(e) {
+  var sh = SpreadsheetApp.getActiveSheet();
+  var shName = sh.getName();
+
+  switch (shName) {
+    case "Discounts":
+      if (e.range.getA1Notation() == "A1") { getDiscounts(); }
+      break;
+    case "Balance":
+      if (e.range.getA1Notation() == "A1") { showTransactions(); }
+      break;
+    case "P&D":
+      var notation = e.range.getA1Notation();
+      if (notation == "C1" || notation == "C2" || notation == "E1" || notation == "C4") {
+        updateCustomersPayments();
+      }
+      break;
+  }
+}
+```
+
+**Trigger mappings:**
+
+| Sheet | Cell edited | Action |
+|-------|-------------|--------|
+| `Discounts` | `A1` | `getDiscounts()` — reloads discount grid for the customer in H2 |
+| `Balance` | `A1` | `showTransactions()` — reloads all transactions for the customer named in A1 |
+| `P&D` | `C1`, `C2`, `E1`, or `C4` | `updateCustomersPayments()` — re-runs the payment query with updated filters |
+
+---
+
+## `showSidebar()`
+
+Opens the Arsinous sidebar panel (300 px wide) rendered from `sidebar/index.html`.
+
+```javascript
+function showSidebar() {
+  var html = HtmlService.createHtmlOutputFromFile('sidebar/index')
+    .setTitle('Arsinous')
+    .setWidth(300);
+  SpreadsheetApp.getUi().showSidebar(html);
+}
+```
+
+The sidebar is the primary control surface for date range filters, inventory display preferences, and column sort order. Settings changed in the sidebar are persisted via `refreshAllProperties` and read back by `getDates`, `updateInventory`, and similar functions.
+
+---
+
+## `updateCurrentTab()`
+
+Routes to the correct sheet-refresh function based on the name of the active sheet. This is the function bound to the **Arsinous → Update Current Tab** menu item.
+
+```javascript
+function updateCurrentTab() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getActiveSheet();
+  var shName = sh.getName();
+
+  if      (shName == "Inventory")    { updateInventory(); }
+  else if (shName == "Products")     { updateProducts(); }
+  else if (shName == "Customers")    { updateCustomers(); }
+  else if (shName == "Invoices")     { updateInvoices(); }
+  else if (shName == "P&D")          { updateCustomersPayments(); }
+  else if (shName == "All Balances") { updateAllBalances(); }
+  else if (shName == "Balance")      { showTransactions(); }
+  else if (shName == "Discounts")    { getDiscounts(); }
+  else {
+    throw('"Inventory", "Products", "Discounts", "Customers", "Invoices", "Balance", "All Balances" or "P&D" tabs can be updated only.');
+  }
+}
+```
+
+**Supported sheets and their update functions:**
+
+| Sheet name | Function called |
+|---|---|
+| `Inventory` | `updateInventory()` |
+| `Products` | `updateProducts()` |
+| `Customers` | `updateCustomers()` |
+| `Invoices` | `updateInvoices()` |
+| `P&D` | `updateCustomersPayments()` |
+| `All Balances` | `updateAllBalances()` |
+| `Balance` | `showTransactions()` |
+| `Discounts` | `getDiscounts()` |
+
+Any other sheet name causes a descriptive error to be thrown.
+
+---
+
+## `getDates()`
+
+Reads time-period preferences from user properties and returns a `{ startDate, endDate }` object with both dates formatted as `"YYYY-MM-DD"` strings ready for SQL `WHERE` clauses.
+
+```javascript
+function getDates() {
+  var props = JSON.parse(readProperties());
+  var timePeriod = props.timePeriod;
+  var startDate = new Date();
+  var endDate = new Date();
+
+  if      (timePeriod == "all")       { startDate.setYear(1970); }
+  else if (timePeriod == "prevYear")  { /* first day of last year → last day of last year */ }
+  else if (timePeriod == "thisYear")  { startDate.setMonth(0); startDate.setDate(1); }
+  else if (timePeriod == "prevMonth") { /* first day of last month → last day of last month */ }
+  else if (timePeriod == "thisMonth") { startDate.setDate(1); }
+  else { startDate = new Date(props.startDate); endDate = new Date(props.endDate); }
+
+  // format both dates as YYYY-MM-DD
+  return { startDate: startDate, endDate: endDate };
+}
+```
+
+**Supported `timePeriod` values:**
+
+| Value | Start date | End date |
+|-------|-----------|----------|
+| `"all"` | 1970-01-01 | Today |
+| `"prevYear"` | Jan 1 of last year | Dec 31 of last year |
+| `"thisYear"` | Jan 1 of this year | Today |
+| `"prevMonth"` | 1st of last month | Last day of last month |
+| `"thisMonth"` | 1st of this month | Today |
+| any other | `props.startDate` | `props.endDate` |
+
+**Returns:** `{ startDate: "YYYY-MM-DD", endDate: "YYYY-MM-DD" }` — used internally by `updateInvoices`.
+
+---
+
+## `updateAllBalances()`
+
+Clears the **All Balances** sheet and rewrites a per-customer summary showing each customer's total outstanding balance (invoices minus payments).
+
+```javascript
+function updateAllBalances() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName("All Balances");
+  sh.activate();
+  sh.getRange("A3:D").clearContent();
+
+  var query =
+    'SELECT T.name, sum(T.amount) FROM ( ' +
+    'SELECT customers.name, sum(-customers_payments.amount) AS amount ' +
+    '  FROM customers INNER JOIN customers_payments ON customers_payments.customer_id = customers.id ' +
+    '  GROUP BY customers.name ' +
+    'UNION ' +
+    'SELECT customers.name, sum(invoices.total + invoices.vat) AS amount ' +
+    '  FROM customers INNER JOIN invoices ON invoices.customer_id = customers.id ' +
+    '  GROUP BY customers.name ' +
+    ') as T GROUP BY T.name;';
+  // writes output sorted alphabetically to A3
+  sh.getRange("B1").setValue(new Date());
+}
+```
+
+**Query logic:** A `UNION` of two aggregates — payments summed as negative amounts and invoices summed as positive — grouped and totalled per customer name. A positive balance means the customer owes money; a negative balance means overpayment.
+
+Data rows start at **A3**, sorted alphabetically by customer name. A timestamp is written to `B1`.
+
+---
+
+## `updateBalanceTab()`
+
+Refreshes the **SoA Inputs** sheet with a Statement of Account for a selected customer, including an optional opening balance for the date range.
+
+**Filter inputs** are read from the SoA Inputs sheet:
+
+| Cell | Variable | Description |
+|------|----------|-------------|
+| `C1` | `startDate` | Start of period (display value) |
+| `C2` | `endDate` | End of period (display value) |
+| `F1` | `customerId` | Numeric customer ID |
+
+```javascript
+function updateBalanceTab() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName('SoA Inputs');
+  // Opening balance query (if startDate is set):
+  var queryStartBalance =
+    "SELECT SUM(amount) FROM (" +
+    "  SELECT COALESCE(SUM(total) + SUM(vat), 0) AS amount FROM invoices " +
+    "    WHERE customer_id=" + customerId + " AND date < '" + startDate + "' " +
+    "  UNION ALL " +
+    "  SELECT COALESCE(-SUM(amount), 0) AS amount FROM customers_payments " +
+    "    WHERE customer_id=" + customerId + " AND date < '" + startDate + "'" +
+    ") as a";
+  // Main transaction query (UNION of invoices + payments in date range)
+}
+```
+
+**Opening balance:** If `startDate` is set, a separate query sums all invoices and payments before the start date and writes the result to cell `B5`. This becomes the "brought forward" figure.
+
+**Main query:** A `UNION ALL` of invoices and payments for the customer within the date range, ordered by date. Columns written are `date`, `type`, `name/num`, `amount` (invoices positive, payments negative). Results write from row 11.
+
+<Note>
+  If `customerId` is empty or non-numeric, `updateBalanceTab` writes `"Customer have to be selected"` into cell `A11` and skips the database query entirely.
+</Note>
+
+---
+
+## `updateInventory(hideEmpty, sortCol)`
+
+Refreshes the **Inventory** sheet by merging product, lot (`irs_items`), and purchase order (`pos_items`) data into a single denormalised view.
+
+```javascript
+function updateInventory(hideEmpty, sortCol) {
+  if (hideEmpty === undefined) {
+    var props = JSON.parse(readProperties());
+    hideEmpty = props.hideEmpty || false;
+    sortCol = props.orderCol || 2;
+  }
+  var products = JSON.parse(getAllFromDB('products'));
+  var irs = JSON.parse(getAllFromDB('irs_items', ' WHERE in_stock > 0 '));
+  var pos = JSON.parse(getAllFromDB('pos_items', ' WHERE quantity > 0 '));
+  // merges lots and POs per product, sorts, writes header + data rows
+  var rule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+  sh.getRange("A3:A").setDataValidation(rule);
+  return JSON.stringify({ message: "Updated." });
+}
+```
+
+<ParamField path="hideEmpty" type="boolean" optional>
+  When `true`, products with no in-stock lots and no open purchase orders are excluded from the output. Defaults to the `hideEmpty` user property (set via the sidebar), or `false` if not set.
+</ParamField>
+
+<ParamField path="sortCol" type="number" optional>
+  The zero-based column index to sort by. `1` = id (numeric sort), `2` = name (alpha sort). Defaults to the `orderCol` user property, or `2` (name) if not set.
+</ParamField>
+
+**Output columns (written from row 3):**
+
+| Column | Content |
+|--------|---------|
+| A | Checkbox (data validation applied to A3:A) |
+| B | Product id |
+| C | Product name |
+| D | Category |
+| E | Total in-stock quantity (sum across all lots) |
+| F | Total on-order quantity (sum across open POs) |
+| G | Lot identifiers, expiry dates, and per-lot quantities (newline-separated) |
+| H | Lot costs (newline-separated) |
+| I | Lot final costs (newline-separated) |
+
+Row 1 is a title row (`"Inventory"` + updated timestamp). Row 2 is the column header row. Data starts at row 3.
+
+**Returns:** `JSON.stringify({ message: "Updated." })` — used by the sidebar to confirm completion.
+
+---
+
+## `showTransactions()`
+
+Fetches all invoices and payments for the customer named in cell `A1` of the **Balance** sheet, merges them into a single chronological list, and writes the result starting at row 3.
+
+```javascript
+function showTransactions() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName("Balance");
+  sh.activate();
+  sh.getRange("A3:H").clearContent();
+  var customerName = sh.getRange("A1").getValue();
+  if (customerName == "") { throw("Select Customer"); }
+  var customers = JSON.parse(getAllFromDB('customers'));
+  var customer = customers.filter(function(v) { return v.name == customerName; })[0];
+  if (!customer) { throw("Cannot find '" + customerName + "'"); }
+  var invoices = JSON.parse(getAllFromDB('invoices', " WHERE customer_id = " + customer.id));
+  var payments = JSON.parse(getAllFromDB('customers_payments', " WHERE customer_id = " + customer.id));
+  // merge, sort by date ascending, write with headers from row 3
+}
+```
+
+**Headers written to row 3:** `Id`, `Date`, `Type`, `Name`, `Amount`, `VAT`, `Total`, `Comment`.
+
+**Invoice rows:** `[id, date, type, name, total, vat, total+vat, comments]`
+
+**Payment rows:** `[id, date, type, num, "", "", -amount, comments]` — amount is negated to represent money out.
+
+The function resolves the customer record by matching `A1`'s text value against `customers.name`. This means the name must match the database exactly, including case.
+
+---
+
+## `runningBallance(amounts)`
+
+A **custom Sheets formula** function. Takes a single-column range of numbers and returns a same-length array of cumulative running totals.
+
+```javascript
+function runningBallance(amounts) {
+  if (amounts[0]) {
+    while (amounts[amounts.length - 1] == "") { amounts.pop(); }
+    if (amounts[0]) {
+      return amounts.map(function(row, index) {
+        var total = amounts.slice(0, index + 1)
+                           .reduce(function(total, num) {
+                             if (isNaN(num[0])) { num[0] = 0; }
+                             return total + Number(num[0]);
+                           }, 0);
+        return total;
+      });
+    }
+  }
+}
+```
+
+<ParamField path="amounts" type="Range">
+  A single-column range of numeric values (as passed from a Google Sheets formula, e.g. `=runningBallance(D11:D100)`). Trailing empty rows are trimmed before processing. Non-numeric values are treated as `0`.
+</ParamField>
+
+**Returns:** A vertical array of the same length as the trimmed input, where each value is the cumulative sum up to and including that row.
+
+<Warning>
+  The function name in the source is spelled **`runningBallance`** (double-l). You must use this exact spelling in your Sheets formula: `=runningBallance(...)`. The more common spelling `runningBalance` will result in a `#NAME?` error.
+</Warning>
+
+---
+
+## `accoutsReceivable(transactions, date)`
+
+A **custom Sheets formula** function that produces an accounts receivable aging analysis from a transaction range. Buckets the unpaid balance into five aging bands: 0–30 days, 30–60 days, 60–90 days, 90–120 days, and over 120 days.
+
+<ParamField path="transactions" type="Range" optional>
+  A range of transaction data with columns: date (col 0), type (col 1), name (col 2), amount (col 3). If not provided, the function reads from `Balance!A11:D` automatically and takes the reference date from `Balance!C2`.
+</ParamField>
+
+<ParamField path="date" type="Date" optional>
+  The reference date for aging calculations. Required when `transactions` is passed explicitly; auto-read from `Balance!C2` otherwise.
+</ParamField>
+
+**Returns:** A 3×4 array suitable for use as a multi-cell formula output (use `Ctrl+Shift+Enter`):
+
+```
+TOTAL          | <total>      | 60–90 days  | <amount>
+0–30 days      | <amount>     | 90–120 days | <amount>
+30–60 days     | <amount>     | over 120 days | <amount>
+```
+
+<Warning>
+  The function name in the source is spelled **`accoutsReceivable`** (missing the `n` in "accounts"). You must use this exact spelling in Sheets: `=accoutsReceivable(...)`.
+</Warning>
+
+---
+
+## `readProperties()`
+
+Returns all user properties as a JSON string. Used internally by `getDates`, `updateInventory`, and any function that reads sidebar settings.
+
+```javascript
+function readProperties() {
+  var userProperties = PropertiesService.getUserProperties();
+  var props = userProperties.getProperties();
+  return JSON.stringify(props);
+}
+```
+
+**Returns:** A JSON string of all user property key-value pairs. Keys include `timePeriod`, `keyword`, `orderCol`, `hideEmpty`, `startDate`, `endDate`.
+
+---
+
+## `updateProperty(key, value)`
+
+Sets a single user property key to a given value. Called by the sidebar to update individual settings without overwriting the full property set.
+
+<ParamField path="key" type="string">
+  The property key to set (e.g., `"timePeriod"`, `"orderCol"`, `"hideEmpty"`).
+</ParamField>
+
+<ParamField path="value" type="string">
+  The value to store. All user properties are stored as strings.
+</ParamField>
+
+---
+
+## `refreshAllProperties(data)`
+
+Bulk-replaces the five primary sidebar-controlled user properties in one call. This is called when the user clicks "Apply" in the sidebar after adjusting multiple settings.
+
+```javascript
+function refreshAllProperties(data) {
+  data = JSON.parse(data);
+  var userProperties = PropertiesService.getUserProperties();
+  var props = {
+    timePeriod: data.timePeriod,
+    keyword:    data.keyword,
+    orderCol:   data.orderCol,
+    startDate:  data.startDate,
+    endDate:    data.endDate
+  };
+  userProperties.setProperties(props);
+}
+```
+
+<ParamField path="data" type="string">
+  A JSON string with the following fields:
+
+  | Field | Description |
+  |-------|-------------|
+  | `timePeriod` | One of: `"all"`, `"prevYear"`, `"thisYear"`, `"prevMonth"`, `"thisMonth"`, or `"custom"`. |
+  | `keyword` | Search/filter keyword (used by the sidebar UI). |
+  | `orderCol` | Inventory sort column: `1` = by id, `2` = by name. |
+  | `startDate` | Custom start date string (used when `timePeriod` is custom). |
+  | `endDate` | Custom end date string (used when `timePeriod` is custom). |
+</ParamField>
+
+---
+
+## `editInvoiceOrNote(type)`
+
+Validates the active sheet and row, verifies the selected document matches the expected type, then opens the invoice edit dialog.
+
+<ParamField path="type" type="string">
+  The expected document type: `"invoice"` or `"credit note"`. If the selected row's type column does not match this value, the function throws an error.
+</ParamField>
+
+**Validation rules:**
+- Active sheet must be `"Invoices"` or `"Balance"`, and cell A of the selected row must be non-empty.
+- On the `"Invoices"` sheet: row must be ≥ 2; type is read from column 2.
+- On the `"Balance"` sheet: row must be ≥ 4; type is read from column 3.
+- If the row's document type does not equal the `type` argument, throws `"Selected document is <actual_type> but not <type>"`.
+
+On success, calls `showInvoice(id, type)` with the id from column A of the selected row.
+
+---
+
+## `deleteInvoiceOrNote(type)`
+
+Same validation as `editInvoiceOrNote`, then shows a confirmation dialog and — if confirmed — calls `deleteInvoice(id)`.
+
+<ParamField path="type" type="string">
+  The expected document type: `"invoice"` or `"credit note"`.
+</ParamField>
+
+The confirmation dialog reads: `"Are you sure you want to delete <type> with id:<id>"`. If the user clicks YES, `deleteInvoice(id)` is called. If NO, a toast `"Operation canceled."` is shown.
+
+<Warning>
+  Deletion is permanent and cannot be undone from the UI. The linked Google Sheets invoice file is **not** removed from Drive — only the database records are deleted. See [`deleteInvoice`](/reference/invoice-functions#deleteinvoice) for the full deletion behavior.
+</Warning>
+
+---
+
+## `navigateTo(type, id)`
+
+Opens a URL in a new browser tab by rendering a minimal HTML redirect modal that calls `window.open(...)` and immediately closes itself.
+
+```javascript
+function navigateTo(type, id) {
+  var html = '<!DOCTYPE html><html><body><button onclick="google.script.host.close()">Close</button>'
+    + '<script>window.open("';
+  if (type == "sheet") {
+    html += 'https://docs.google.com/spreadsheets/d/';
+  } else if (type == "folder") {
+    html += 'https://drive.google.com/drive/folders/';
+  }
+  html += id + '","_blank"); google.script.host.close();</script></body></html>';
+  var output = HtmlService.createHtmlOutput(html)
+    .setWidth(300).setHeight(100)
+    .setSandboxMode(HtmlService.SandboxMode.IFRAME);
+  SpreadsheetApp.getUi().showModalDialog(output, 'Redirecting....');
+}
+```
+
+<ParamField path="type" type="string">
+  `"sheet"` to open a Google Sheets document, or `"folder"` to open a Google Drive folder.
+</ParamField>
+
+<ParamField path="id" type="string">
+  The Google Drive file ID (for sheets) or folder ID (for folders) to open.
+</ParamField>
+
+<Note>
+  The redirect modal uses `IFRAME` sandbox mode so that `window.open` is not blocked. The modal closes itself via `google.script.host.close()` immediately after opening the tab. A manual **Close** button is also provided for browsers that block pop-ups.
+</Note>

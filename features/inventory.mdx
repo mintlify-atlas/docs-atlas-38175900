@@ -1,0 +1,151 @@
+---
+title: "Track Inventory Lots and Stock Levels"
+sidebarTitle: "Inventory"
+description: "View real-time stock levels by product, including lot numbers, expiry dates, quantities on hand, and quantities on purchase order."
+---
+
+The Inventory sheet gives you a consolidated, per-product view of everything in your warehouse — combining goods-receipt lots from MySQL with open purchase order quantities into a single refreshable grid. Because each invoice deducts stock directly from the `irs_items` table at the lot level, the Inventory sheet always reflects your actual on-hand quantities the moment you refresh it. You can sort by ID or name, and filter out products with no stock to focus on what matters right now.
+
+## Data Sources
+
+The Inventory sheet draws from two MySQL tables:
+
+<Note>
+  `irs_items` is the **goods receipt** table — each row represents a batch (lot) of a product received into stock. `pos_items` is the **purchase order items** table — each row represents a quantity of a product on an open purchase order. Both tables must be populated in MySQL; Arsinous V8 Sales reads them but does not provide a UI for creating goods receipts or purchase orders directly.
+</Note>
+
+| Table | Key fields | Role in Inventory |
+|-------|-----------|-------------------|
+| `irs_items` | `product_id`, `lot`, `exp_date`, `in_stock`, `cost`, `final_cost` | Provides on-hand stock per lot |
+| `pos_items` | `product_id`, `quantity` | Provides ordered (on PO) quantity |
+| `products` | `id`, `name`, `cat` | Provides product name and category |
+
+## The Inventory Sheet Layout
+
+After a refresh, the sheet has two header rows followed by one data row per product.
+
+| Column | Field | Description |
+|--------|-------|-------------|
+| A | ✔ | Checkbox (data validation applied to A3:A) |
+| B | `id` | Product ID |
+| C | `name` | Product name |
+| D | `cat` | Category |
+| E | `quantity` | Total in-stock quantity across all lots |
+| F | `ordered (PO)` | Total quantity on open purchase orders |
+| G | `expiry dates` | All lots formatted as `"<lot> <exp_date> (<in_stock>)"`, newline-separated |
+| H | `cost` | Cost values per lot, newline-separated |
+| I | `final_cost` | Final cost values per lot, newline-separated |
+
+Row 1 contains a title row (`"Inventory"`) with a **updated:** timestamp in column F showing when the last refresh ran. Row 2 contains the column headers.
+
+## Refreshing the Inventory
+
+Trigger a refresh in any of these ways:
+
+- **Arsinous menu → Update Current Tab** while the Inventory sheet is active
+- **Sidebar → Refresh Inventory** button
+- Programmatically by calling `updateInventory()` — this is also called automatically after every invoice save or delete
+
+## How `updateInventory` Works
+
+```javascript
+// Excerpt from Updates.gs
+function updateInventory(hideEmpty, sortCol) {
+  if (hideEmpty === undefined) {
+    var props = JSON.parse(readProperties());
+    hideEmpty = props.hideEmpty || false;
+    sortCol   = props.orderCol  || 2;
+  }
+
+  var products = JSON.parse(getAllFromDB('products'));
+  var irs      = JSON.parse(getAllFromDB('irs_items', ' WHERE in_stock > 0 '));
+  var pos      = JSON.parse(getAllFromDB('pos_items',  ' WHERE quantity > 0 '));
+
+  products = products.map(function(p) {
+    p.lots = irs.filter(function(l) { return l.product_id == p.id; });
+    p.pos  = pos.filter(function(l) { return l.product_id == p.id; });
+    return p;
+  });
+
+  if (hideEmpty === true || hideEmpty === "true") {
+    products = products.filter(function(p) { return p.lots.length > 0 || p.pos.length > 0; });
+  }
+
+  var output = products.map(function(p) {
+    var q = 0, expiryDates = [], costs = [], finalCosts = [];
+    p.lots.forEach(function(item) {
+      if (!isNaN(item.in_stock)) {
+        q += Number(item.in_stock);
+        expiryDates.push(
+          (item.lot ? item.lot + " " : "") +
+          (item.exp_date || " - ") +
+          "(" + item.in_stock + ")"
+        );
+        costs.push(item.cost);
+        finalCosts.push(item.final_cost);
+      }
+    });
+    var ordered = p.pos.reduce(function(sum, item) {
+      return sum + (isNaN(item.quantity) ? 0 : Number(item.quantity));
+    }, 0);
+    return [false, p.id, p.name, p.cat, q, ordered,
+            expiryDates.join("\n"), costs.join("\n"), finalCosts.join("\n")];
+  });
+
+  // Sort, prepend headers, write to sheet
+  output.sort(/* by sortCol */);
+  output.unshift(["✔","id","name","cat","quantity","ordered (PO)","expiry dates","cost","final_cost"]);
+  output.unshift(["Inventory","","","","","updated:", new Date(),"",""]);
+  sh.getRange(1, 1, output.length, output[0].length).setValues(output);
+
+  // Add checkbox validation to column A (data rows)
+  var rule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+  sh.getRange("A3:A").setDataValidation(rule);
+}
+```
+
+### Parameters
+
+<ParamField query="hideEmpty" type="boolean" default="false">
+  When `true`, products with no in-stock lots **and** no open purchase orders are excluded from the output. The preference is stored in user properties via `readProperties()` / `updateProperty()` and persists between sessions.
+</ParamField>
+
+<ParamField query="sortCol" type="number" default="2">
+  Column index (0-based within the output array) to sort by. Use `1` to sort by product `id`, `2` to sort by `name`. Stored in user properties as `orderCol`.
+</ParamField>
+
+<Tip>
+  Enable **Hide Empty** to declutter the Inventory sheet during picking or stocktaking — you'll see only products that currently have stock on hand or are on order. Disable it when you need a full product catalog view including items currently out of stock.
+</Tip>
+
+## Expiry Date Display Format
+
+When a product has multiple lots in stock, the `expiry dates` column shows one line per lot, formatted as:
+
+```
+LOT_NUMBER EXP_DATE (QTY_ON_HAND)
+```
+
+For example, a product with two lots might display:
+
+```
+A001 2025-06-30 (120)
+A002 2025-12-31 (48)
+```
+
+If a lot has no lot number recorded, the lot number prefix is omitted.
+
+## Editing a Product from Inventory
+
+You don't need to switch to the Products sheet to edit a product's catalog details. Select any row in the Inventory sheet and choose **Arsinous menu → Edit Product**. The `editProduct()` function works from both the `Products` and `Inventory` sheets — it reads the active sheet's header row to build the key map and opens the same 600 × 600 px product edit modal.
+
+## User Preferences Storage
+
+The `hideEmpty` and `sortCol` settings are persisted in Google Apps Script user properties so they survive sheet refreshes and browser sessions. They are read at the start of every `updateInventory()` call when no explicit arguments are passed, and can be updated through the sidebar controls.
+
+```javascript
+// Conceptual flow
+var props = JSON.parse(readProperties());
+hideEmpty = props.hideEmpty || false;
+sortCol   = props.orderCol  || 2;
+```

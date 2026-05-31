@@ -1,0 +1,310 @@
+---
+title: "Invoice Script Functions Reference"
+sidebarTitle: "Invoice Functions"
+description: "Apps Script functions for creating, retrieving, updating, and deleting invoices and credit notes, including linked Google Sheets document management."
+---
+
+The invoice module is the most complex part of Arsinous V8 Sales. Each invoice (or credit note) is stored in MySQL across two tables — `invoices` and `invoices_items` — and simultaneously reflected in a dedicated Google Sheets file copied from a master template and filed inside the customer's Drive folder. The save flow adjusts lot-level stock quantities in `irs_items`, runs all database writes inside a single transaction, and then updates the Sheets invoice document with customer, date, and line-item data. Deletion reverses stock changes before removing the database records. The functions below cover the full lifecycle from dialog display through spreadsheet hydration.
+
+---
+
+## `showInvoice(id, type)`
+
+Opens a **1000 × 600** modal dialog rendered from the `invoice/index` HTML template.
+
+```javascript
+function showInvoice(id, type) {
+  type = type || "invoice";
+  var html = HtmlService.createTemplateFromFile("invoice/index");
+  html.id = id ? id : "";
+  html.type = type;
+  html = html.evaluate();
+  html.addMetaTag('viewport', '...');
+  html.setWidth(1000).setHeight(600);
+  var title = id ? "Edit " : "Create New ";
+  SpreadsheetApp.getUi().showModalDialog(html, title + type);
+}
+```
+
+<ParamField path="id" type="string | number" optional>
+  The invoice ID to edit. When provided, the dialog titles itself **"Edit invoice"** (or **"Edit credit note"**) and loads the existing record via `getInvoice(id)` on the front-end. When `null` or omitted, the dialog titles itself **"Create New invoice"** and initialises with an empty form.
+</ParamField>
+
+<ParamField path="type" type="string" optional>
+  The document type. Accepted values are `"invoice"` (default) and `"credit note"`. This value is passed directly into the template and affects how the invoice spreadsheet labels itself (see `updateInvoiceSs`).
+</ParamField>
+
+---
+
+## `getNextId()`
+
+Queries the MySQL `AUTO_INCREMENT` counter for the `invoices` table so the front-end can display a preview of the next invoice number before the record is saved.
+
+```javascript
+function getNextId() {
+  var conn = Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.createStatement();
+  var query = "SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_name = 'invoices'";
+  var results = stmt.executeQuery(query);
+  var id = 0;
+  if (results.next()) { id = results.getString(1); }
+  return JSON.stringify(("000000" + (Number(id))).slice(-6));
+}
+```
+
+**Returns:** A JSON-encoded zero-padded 6-digit string representing the next auto-increment value. For example, if `AUTO_INCREMENT` is 42, the return value is `"\"000042\""`.
+
+<Note>
+  This value is a preview only. The actual ID assigned on INSERT may differ if another invoice is saved concurrently between the call to `getNextId` and the subsequent `saveInvoice`.
+</Note>
+
+---
+
+## `saveInvoice(data)`
+
+The central write function for invoices. Accepts a JSON-encoded invoice object, adjusts inventory lot quantities, persists the invoice header and line items in a transaction, creates or reuses a Google Sheets invoice file, and finally hydrates that file with the full invoice data.
+
+<ParamField path="data" type="string">
+  A JSON-encoded invoice object. Key fields:
+
+  | Field | Type | Description |
+  |---|---|---|
+  | `id` | string \| null | `null` for a new invoice; an existing invoice ID for an update. |
+  | `type` | string | `"invoice"` or `"credit note"`. |
+  | `customer_id` | string | MySQL customer ID. |
+  | `date` | string | Invoice date in `YYYY-MM-DD` format. |
+  | `sp_id` | string | Salesperson ID. |
+  | `name` | string | Invoice name / reference. |
+  | `total` | number | Net total (before VAT). |
+  | `vat` | number | VAT amount. |
+  | `ss_id` | string | Google Sheets file ID of the existing invoice spreadsheet (for updates). |
+  | `comments` | string | Optional free-text comments. |
+  | `cost` | number | Total cost for margin tracking. |
+  | `items` | array | Line items — see below. |
+  | `customer` | object | `{ folder, code, details }` — used for Drive filing and spreadsheet population. |
+  | `products` | object | Keyed by product ID; provides `name` and `retail` for `updateInvoiceSs`. |
+  | `discounts` | object | Keyed by item index; provides discount and VAT breakdown for `updateInvoiceSs`. |
+  | `lots` | object | Keyed by lot ID; provides `exp_date` for `updateInvoiceSs`. |
+
+  Each element of `items` must include: `id` (product id), `lot` (lot id), `qty`, `price`, `discount`, `fixed_discount`, `manual_discount`, `code`, `cost`, `priceAfterDiscount`.
+</ParamField>
+
+**Save flow (in order):**
+
+1. **Aggregate new lot quantities** — sums `qty` per `lot` across all items into a `lots` map.
+2. **Edit mode — reverse prior quantities** — if `data.id` is set, reads `lot_id, qty` from `invoices_items` for the existing invoice and subtracts those quantities from the `lots` map (net delta). Then deletes all existing `invoices_items` for the invoice.
+3. **Update stock** — batch-executes `UPDATE irs_items SET in_stock = in_stock - ? WHERE id = ?` for every lot in the map.
+4. **INSERT or UPDATE the `invoices` record** — new invoices use `RETURN_GENERATED_KEYS` to capture the assigned ID; updates rewrite `name`, `customer_id`, `date`, `total`, `vat`, `ss_id`, `comments`, and `cost`.
+5. **Create or reuse the invoice Sheets file** — calls `createInvoiceSs(data.ss_id, data)`.
+6. **Batch-INSERT `invoices_items`** — one row per item with `invoice_id`, `product_id`, `lot_id`, `qty`, `price`, `discount`, `fixed_discount`, `manual_discount`, `code`, `cost`, `priceAfterDiscount`.
+7. **Persist `ss_id`** — writes the spreadsheet file ID back to `invoices.ss_id`.
+8. **Commit transaction** — `conn.commit()` is called; the connection is then closed.
+9. **Hydrate the invoice spreadsheet** — calls `updateInvoiceSs(data.ss_id, data)` outside the transaction.
+
+```javascript
+function saveInvoice(data) {
+  data = JSON.parse(data);
+  var conn = Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  conn.setAutoCommit(false);
+  // ... lot aggregation, stock update, record insert/update ...
+  conn.commit();
+  conn.close();
+  updateInvoiceSs(data.ss_id, data);
+}
+```
+
+<Warning>
+  All database operations in `saveInvoice` are wrapped in a single transaction (`conn.setAutoCommit(false)` / `conn.commit()`). If any step fails before `conn.commit()`, the transaction is implicitly rolled back and no data is written. The spreadsheet hydration step (`updateInvoiceSs`) runs **after** the connection is closed and is therefore not part of the transaction — a failure there will leave the database consistent but the spreadsheet potentially stale.
+</Warning>
+
+---
+
+## `getInvoice(id)`
+
+Fetches a single invoice with its line items from the database.
+
+```javascript
+function getInvoice(id) {
+  var invoice = JSON.parse(getItemsFromDB(id, 'invoices', 'id'))[0];
+  if (invoice) {
+    var items = JSON.parse(getItemsFromDB(id, 'invoices_items', 'invoice_id'));
+  } else {
+    throw new Error("Ther is no Ivoice with id =" + id);
+  }
+  return JSON.stringify({ invoice: invoice, items: items });
+}
+```
+
+<ParamField path="id" type="string | number">
+  The invoice primary key to retrieve.
+</ParamField>
+
+**Returns:** A JSON string with the shape `{ invoice: { ...invoices row }, items: [ ...invoices_items rows ] }`. Both `invoice` and each element of `items` are plain objects with MySQL column names as keys and string values (as returned by JDBC's `getString`).
+
+<Note>
+  The error message in the source contains a typo: `"Ther is no Ivoice with id ="`. This is the literal string thrown, so any client-side error handling that matches this message should account for the spelling.
+</Note>
+
+---
+
+## `updateInvoices(ss, sh)`
+
+Refreshes the **Invoices** sheet with all invoices within the current date range, adds a computed **"Total with Vat"** column, and generates spreadsheet link formulas in the final column.
+
+```javascript
+function updateInvoices(ss, sh) {
+  ss = ss || SpreadsheetApp.getActive();
+  sh = sh || ss.getSheetByName("Invoices");
+  sh.clearContents();
+  var dates = getDates();
+  // SELECT invoices.id, type, name, customers.name, date, total, vat, comments, ss_id
+  // FROM invoices JOIN customers ON invoices.customer_id = customers.id
+  // WHERE invoices.date BETWEEN '<startDate>' AND '<endDate>'
+  // ORDER BY invoices.date DESC
+}
+```
+
+<ParamField path="ss" type="Spreadsheet" optional>
+  The Google Sheets spreadsheet object. Defaults to `SpreadsheetApp.getActive()`.
+</ParamField>
+
+<ParamField path="sh" type="Sheet" optional>
+  The sheet to write into. Defaults to the sheet named `"Invoices"` within `ss`.
+</ParamField>
+
+**Behavior:**
+- Clears the entire Invoices sheet before writing.
+- Fetches the date range from `getDates()` (driven by user properties set in the sidebar).
+- Joins `invoices` with `customers` to include the customer name.
+- Sorts the output by invoice ID ascending (despite the query ordering by date descending — the sort is applied in Apps Script after fetch).
+- Inserts a **"Total with Vat"** column at position 8 (index 7) computed as `total + vat` for each row.
+- Writes `=HYPERLINK("https://docs.google.com/spreadsheets/d/<ss_id>","Link")` formulas in column 10 for every data row.
+
+---
+
+## `deleteInvoice(id)`
+
+Reverses inventory lot quantities for all items on the invoice, deletes the invoice and its items from the database in a transaction, and triggers sheet refreshes for Inventory and Invoices.
+
+```javascript
+function deleteInvoice(id) {
+  var conn = Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  conn.setAutoCommit(false);
+  // SELECT lot_id, qty FROM invoices_items WHERE invoice_id = id
+  // UPDATE irs_items SET in_stock = in_stock + ? WHERE id = ?  (batch)
+  // DELETE FROM invoices_items WHERE invoice_id = id
+  // DELETE FROM invoices WHERE id = id
+  conn.commit();
+  conn.close();
+  updateInventory();
+  updateInvoices();
+}
+```
+
+<ParamField path="id" type="string | number">
+  The invoice primary key to delete.
+</ParamField>
+
+**Stock reversal:** The function fetches every `(lot_id, qty)` pair from `invoices_items` for the given invoice and batch-executes `UPDATE irs_items SET in_stock = in_stock + ? WHERE id = ?`, adding the quantities back to stock before removing the invoice records.
+
+<Warning>
+  Deletion is irreversible. The linked Google Sheets invoice file is **not** deleted from Drive — only the database records are removed. The orphaned spreadsheet will remain in the `InvoiceFolder` and in the customer's Drive shortcut.
+</Warning>
+
+---
+
+## `createInvoiceSs(ssId, data)`
+
+Creates a new Google Sheets invoice file by copying the master `InvoiceTemplate`, or reuses an existing file if it can be found by ID. Places a shortcut to the file in the customer's Drive folder for new files.
+
+```javascript
+function createInvoiceSs(ssId, data) {
+  var folder = DriveApp.getFolderById(data.customer.folder);
+  var invoice;
+  try { invoice = DriveApp.getFileById(ssId); } catch(err) {}
+  if (!invoice) {
+    invoice = DriveApp.getFileById(InvoiceTemplate)
+                .makeCopy(("000000" + data.id).slice(-6), DriveApp.getFolderById(InvoiceFolder));
+    folder.createShortcut(invoice.getId());
+  }
+  return invoice.getId();
+}
+```
+
+<ParamField path="ssId" type="string">
+  The Google Drive file ID of an existing invoice spreadsheet. Pass `null` or `undefined` for new invoices. If the file cannot be found by this ID (e.g., it was deleted from Drive), a new copy is created automatically.
+</ParamField>
+
+<ParamField path="data" type="Object">
+  The invoice data object. Must include:
+  - `data.customer.folder` — Drive folder ID of the customer (for shortcut placement).
+  - `data.id` — Invoice ID, used as the file name (zero-padded to 6 digits).
+</ParamField>
+
+**Returns:** The Google Drive file ID (string) of the invoice spreadsheet — either the existing file's ID or the newly created copy's ID.
+
+<Note>
+  New invoice files are placed in the shared `InvoiceFolder` (configured in `Constants.gs`). A shortcut is then created inside the customer's personal folder (`data.customer.folder`). This keeps all invoice files in one central location while making them discoverable from each customer's folder.
+</Note>
+
+---
+
+## `updateInvoiceSs(ssId, data)`
+
+Writes invoice header and line-item data into the Google Sheets invoice file. This is called after the database transaction commits and is the step that makes the invoice spreadsheet human-readable.
+
+```javascript
+function updateInvoiceSs(ssId, data) {
+  var ss = SpreadsheetApp.openById(ssId);
+  var sh = ss.getSheetByName("Invoice");
+  sh.getRange("K6").setValue(data.customer.code);
+  sh.getRange("K7").setValue(data.date);
+  sh.getRange("K8").setValue(("000000" + data.id).slice(-6));
+  sh.getRange("J1").setValue(data.customer.details);
+  sh.getRange("B8").setValue(data.sp ? data.sp.code : "");
+  sh.getRange("A15:O54").clearContent();
+  if (data.type == "credit note") { sh.getRange("A11").setValue("CREDIT NOTE"); }
+  // writes items array from row 15 onward
+}
+```
+
+<ParamField path="ssId" type="string">
+  The Google Drive file ID of the invoice spreadsheet to update.
+</ParamField>
+
+<ParamField path="data" type="Object">
+  The full invoice data object (same object passed through `saveInvoice`).
+</ParamField>
+
+**Cell mappings:**
+
+| Cell | Value |
+|------|-------|
+| `K6` | Customer code |
+| `K7` | Invoice date |
+| `K8` | Zero-padded invoice number (6 digits) |
+| `J1` | Customer details (address block) |
+| `B8` | Salesperson code |
+| `A11` | `"CREDIT NOTE"` label (credit notes only) |
+
+**Line items** are written starting at row 15, one row per item, spanning columns A–O:
+
+| Column | Content |
+|--------|---------|
+| A | Product code |
+| B | Product name |
+| C–E | (blank) |
+| F | Quantity |
+| G | Unit price |
+| H | Subtotal (qty × price) |
+| I | Discount % (as decimal, e.g. `0.10`) |
+| J | Total after discount |
+| K | VAT code |
+| L | VAT amount |
+| M | Total with VAT |
+| N | Retail price |
+| O | Lot expiry date |
+
+<Note>
+  The sheet template has space for 40 line items (rows 15–54). `A15:O54` is cleared before writing, so any items beyond 40 rows would silently overflow without error. Ensure invoices do not exceed 40 line items.
+</Note>

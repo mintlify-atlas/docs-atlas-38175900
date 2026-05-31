@@ -1,0 +1,197 @@
+---
+title: "Date Filters and Time Period Settings"
+sidebarTitle: "Date Filters"
+description: "Control which date range is used when refreshing Invoices, P&D, and other tabs. Choose from preset periods or set a custom From/To date range."
+---
+
+Every time you hit **Refresh current tab** in the Arsinous sidebar, the script needs to know which date window to query. Rather than prompting you each time, Arsinous stores your preferred time period in Google's user-scoped properties store — so your date settings persist across sessions and are completely independent of what any other user of the same spreadsheet has chosen. The top section of the sidebar exposes a dropdown of preset periods plus optional custom date pickers, giving you instant, persistent control over how far back the data pull reaches.
+
+## How Preferences Are Stored
+
+Date filter settings (along with inventory preferences) are persisted using `PropertiesService.getUserProperties()` — Google's per-user, per-script key-value store. Three functions in `sidebar/backend.gs` manage this:
+
+```javascript
+// Read all stored properties, returned as a JSON string
+function readProperties() {
+  var userProperties = PropertiesService.getUserProperties();
+  var props = userProperties.getProperties();
+  return JSON.stringify(props);
+}
+
+// Update a single property key
+function updateProperty(key, value) {
+  var userProperties = PropertiesService.getUserProperties();
+  userProperties.setProperty(key, value);
+}
+
+// Bulk-update all sidebar state at once (called before a tab refresh)
+function refreshAllProperties(data) {
+  data = JSON.parse(data);
+  var userProperties = PropertiesService.getUserProperties();
+  var props = {
+    timePeriod: data.timePeriod,
+    keyword:    data.keyword,
+    orderCol:   data.orderCol,
+    startDate:  data.startDate,
+    endDate:    data.endDate
+  };
+  userProperties.setProperties(props);
+}
+```
+
+<Note>
+  Date preferences are stored per user via `PropertiesService.getUserProperties()`. If multiple people share the same spreadsheet, each person's time period and custom date range are stored separately — changing your filter has no effect on what a colleague sees when they refresh.
+</Note>
+
+Individual properties are also saved reactively via Vue watchers as soon as you interact with the sidebar controls — for example, simply changing the time period dropdown calls `updateProperty('timePeriod', newValue)` immediately, without waiting for you to click **Refresh**.
+
+## The `getDates()` Function
+
+All tab-refresh functions that need a date range call `getDates()` to compute the actual `startDate` and `endDate` strings from the stored `timePeriod` property:
+
+```javascript
+function getDates() {
+  var props = JSON.parse(readProperties());
+  var startDate = new Date();
+  var endDate   = new Date();
+  var timePeriod = props.timePeriod;
+
+  if (timePeriod == "all") {
+    startDate.setYear(1970);
+  } else if (timePeriod == "prevYear") {
+    startDate.setDate(1);
+    startDate.setMonth(0);
+    startDate.setYear(startDate.getFullYear() - 1);
+    endDate.setDate(1);
+    endDate.setMonth(1);
+    endDate.setDate(endDate.getDate() - 1);
+  } else if (timePeriod == "thisYear") {
+    startDate.setMonth(0);
+    startDate.setDate(1);
+  } else if (timePeriod == "prevMonth") {
+    startDate.setMonth(startDate.getMonth() - 1);
+    startDate.setDate(1);
+    endDate.setDate(1);
+    endDate.setDate(endDate.getDate() - 1);
+  } else if (timePeriod == "thisMonth") {
+    startDate.setDate(1);
+  } else {
+    // "custom" or any other value — use stored dates directly
+    startDate = new Date(props.startDate);
+    endDate   = new Date(props.endDate);
+  }
+
+  startDate = startDate.getFullYear() + "-"
+    + ("0" + (startDate.getMonth() + 1)).slice(-2) + "-"
+    + ("0" + startDate.getDate()).slice(-2);
+  endDate = endDate.getFullYear() + "-"
+    + ("0" + (endDate.getMonth() + 1)).slice(-2) + "-"
+    + ("0" + endDate.getDate()).slice(-2);
+
+  return { startDate: startDate, endDate: endDate };
+}
+```
+
+The function always returns an object of the form `{ startDate: "YYYY-MM-DD", endDate: "YYYY-MM-DD" }`, which can be dropped directly into a MySQL `WHERE` clause.
+
+## Time Period Options
+
+The sidebar's time period dropdown (`<b-select>`) exposes the following options:
+
+| Dropdown label | `timePeriod` value | Start date | End date |
+|---|---|---|---|
+| Last 2 weeks | `14` *(numeric)* | Today − 14 days | Today |
+| This Month | `"thisMonth"` | 1st of the current month | Today |
+| Prev Month | `"prevMonth"` | 1st of the previous month | Last day of the previous month |
+| This Year | `"thisYear"` | January 1 of the current year | Today |
+| Prev Year | `"prevYear"` | January 1 of the previous year | December 31 of the previous year |
+| All Dates | `"all"` | January 1, 1970 | Today |
+| Custom Dates | `"custom"` | Value of `props.startDate` | Value of `props.endDate` |
+
+<Tip>
+  Use **This Month** or **Prev Month** for monthly reporting runs. These presets automatically compute the exact first and last days of the relevant month, so you never need to manually enter dates for routine period-end reports — just switch the dropdown and click **Refresh current tab**.
+</Tip>
+
+## Custom Date Range
+
+When you select **Custom Dates**, the **From** and **To** datepickers in the sidebar become enabled. For all other presets, the datepickers are disabled (greyed out) because the date range is computed server-side by `getDates()` and the picker values are ignored.
+
+The sidebar Vue watcher handles the toggle automatically:
+
+```javascript
+watch: {
+  timePeriod(newValue) {
+    google.script.run.updateProperty('timePeriod', newValue);
+    this.endDate = new Date();
+    if (newValue == "custom") {
+      if (!this.startDate) {
+        this.startDate = new Date();
+        this.startDate.setDate(this.startDate.getDate() - 14);
+      }
+    } else if (newValue == "all") {
+      this.startDate = new Date(null); // epoch
+    } else {
+      // preset — compute preview dates in the UI
+      // (getDates() will recompute server-side on refresh)
+    }
+  }
+}
+```
+
+The datepicker `disabled` binding in the template:
+
+```html
+<b-datepicker
+  size="is-small"
+  placeholder="All dates"
+  v-model="startDate"
+  icon="calendar-today"
+  :disabled="timePeriod != 'custom'">
+</b-datepicker>
+```
+
+## How the Refresh Flow Works
+
+<Steps>
+  <Step title="Adjust the date controls">
+    Select a time period from the dropdown, or choose **Custom Dates** and pick your **From** and **To** dates using the datepickers.
+  </Step>
+  <Step title="Click Refresh current tab">
+    The sidebar calls `refreshAllProperties()` server-side, serializing the entire Vue data object (including `timePeriod`, `startDate`, `endDate`, `orderCol`, and `hideEmpty`) as JSON to ensure the server has the latest state.
+  </Step>
+  <Step title="Properties are saved">
+    `refreshAllProperties()` writes all five keys to `PropertiesService.getUserProperties()` in one call.
+  </Step>
+  <Step title="Active tab is refreshed">
+    The success callback immediately calls `updateCurrentTab()`, which dispatches to the correct update function for the active sheet. Any function that needs a date range calls `getDates()` to read the freshly saved properties.
+  </Step>
+</Steps>
+
+## Which Tabs Respect the Date Filter
+
+Not every tab uses `getDates()`. The table below shows how each sheet handles date filtering:
+
+| Sheet | Date filter behavior |
+|---|---|
+| **Invoices** | Uses `getDates()` — invoices are filtered by the chosen date range |
+| **P&D** (Payments & Discounts) | Reads filter values from cells **C1** and **C2** in the P&D sheet directly; the sidebar date range is not used |
+| **Balance** | No date filter — `showTransactions()` loads the full transaction history for the selected customer |
+| **All Balances** | No date filter — shows cumulative balances across all time |
+| **Inventory** | No date filter — controlled by `hideEmpty` and `orderCol` preferences instead |
+| **Products** | No date filter |
+| **Customers** | No date filter |
+
+<Note>
+  The **P&D** tab filters are driven by cell edits, not the sidebar. Changing cells **C1**, **C2**, **E1**, or **C4** in the P&D sheet triggers `updateCustomersPayments()` automatically via the `onEdit` trigger, independent of the sidebar date settings.
+</Note>
+
+## Additional Inventory Properties
+
+Two other user properties are managed alongside date settings and affect the **Inventory** tab refresh:
+
+| Property key | Sidebar control | Effect |
+|---|---|---|
+| `orderCol` | Sort by dropdown (**Id** = `"1"`, **Name** = `"2"`) | Column index used by `updateInventory()` to sort the product list |
+| `hideEmpty` | **Hide empty** checkbox | When `true`, products with no stock (no IRS lots and no open POs) are excluded from the Inventory sheet |
+
+These properties are saved reactively by their own Vue watchers as soon as you interact with the controls, and are also included in the bulk `refreshAllProperties()` call when you click **Refresh current tab**.

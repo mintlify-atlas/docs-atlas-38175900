@@ -1,0 +1,163 @@
+---
+title: "Set Per-Customer Product Discounts"
+sidebarTitle: "Discounts"
+description: "Configure percentage and fixed discounts for each product per customer. Discounts override the product's default discount when invoicing."
+---
+
+The Discounts module lets you configure bespoke pricing for individual customers — per-product overrides that silently take precedence over the product's global default discount rules whenever that customer is invoiced. The workflow is simple: enter a customer ID, load their discount grid, edit the columns you want to change, and save. Behind the scenes, the save operation atomically replaces all of that customer's discount rows in MySQL, ensuring there are no stale or duplicate entries.
+
+## The Discounts Sheet
+
+The Discounts sheet is loaded customer-by-customer. Enter a customer ID in cell **H2** to load that customer's discount grid starting at row 5.
+
+| Column | Source | Description |
+|--------|--------|-------------|
+| A | `products.id` | Product ID |
+| B | `products.code` | Product code |
+| C | `products.name` | Product description |
+| D | `products.cost` | Default cost price |
+| E | `products.price` | Wholesale price |
+| F | `products.retail` | Retail price |
+| G | `products.def_discount` | Product-level default quantity-break discount |
+| H | `products.def_fixed_discount` | Product-level default fixed discount % |
+| I | `discounts.discount` | **Customer override** — quantity-break discount rule |
+| J | `discounts.fixed_discount` | **Customer override** — flat discount percentage |
+
+Columns A–H are read-only reference data from `products`. Columns I and J are where you enter or modify the customer-specific overrides.
+
+## Loading Discounts
+
+Enter the customer's ID in cell **H2**. The sheet automatically calls `getDiscounts()` via the `onEdit` trigger when cell **A1** is edited — but the most direct way is to use **Arsinous menu → GET Discounts** or the sidebar **Load Discounts** button.
+
+`getDiscounts(conn)` runs the following query, LEFT-joining each product against that customer's discount rows:
+
+```javascript
+// Excerpt from Discounts.gs
+function getDiscounts(conn) {
+  var ss  = SpreadsheetApp.getActiveSpreadsheet();
+  var sh  = ss.getSheetByName("Discounts");
+  sh.getRange("A5:M").clearContent();
+  var customerId = sh.getRange("H2").getValue();
+
+  conn = conn || Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var results = conn.createStatement().executeQuery(
+    "SELECT products.id, products.code, products.name, products.cost, "
+    + "products.price, products.retail, products.def_discount, "
+    + "products.def_fixed_discount, customer_discounts.discount, "
+    + "customer_discounts.fixed_discount "
+    + "FROM products "
+    + "LEFT JOIN (SELECT * FROM discounts WHERE customer_id = " + customerId
+    + ") AS customer_discounts ON products.id = customer_discounts.product_id"
+  );
+
+  var products = [];
+  var numCols = results.getMetaData().getColumnCount();
+  while (results.next()) {
+    var product = [];
+    for (var col = 0; col < numCols; col++) {
+      product.push(results.getString(col + 1));
+    }
+    products.push(product.slice());
+  }
+  results.close();
+  conn.close();
+
+  if (products.length > 0) {
+    sh.getRange(5, 1, products.length, products[0].length).setValues(products);
+  }
+  ss.toast('"Discounts" tab is updated');
+}
+```
+
+Products that have no existing discount for this customer will show blank values in columns I and J — they will continue to use the product-level defaults on invoices.
+
+## Editing Discounts
+
+Modify the values in columns I and J directly in the sheet:
+
+- **Column I (`discount`)** — enter a quantity-break rule string using the same format as `def_discount` on the product (e.g. `"6+2,12+6"`). Leave blank to fall back to the product default.
+- **Column J (`fixed_discount`)** — enter a numeric flat discount percentage (e.g. `15`). Leave blank to fall back to the product default.
+
+You can set one, both, or neither override for each product row. Rows where both columns are blank are not saved to the `discounts` table — they will simply use the product's global defaults.
+
+## Saving Discounts
+
+<Warning>
+  Saving discounts **first deletes ALL existing discount rows for the selected customer** from the `discounts` table, then inserts the new values. Make sure every product row you want to keep a discount for has its values filled in columns I and/or J before clicking Save. Any row with both columns blank will be treated as "use default" and will not be re-inserted.
+</Warning>
+
+Go to **Arsinous menu → SAVE Discounts** or click the sidebar **Save Discounts** button. This calls `saveDiscounts(conn)`:
+
+```javascript
+// Excerpt from Discounts.gs
+function saveDiscounts(conn) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName("Discounts");
+  var data       = sh.getRange("A5:J").getValues();
+  var customerId = sh.getRange("H2").getValue();
+
+  // Keep only rows where at least one override column is filled and product id is set
+  data = data.filter(function(v) {
+    return (v[8] !== "" || v[9] !== "") && v[0] != "";
+  });
+
+  conn = conn || Jdbc.getConnection(InstanceUrl, User, UserPwd);
+  var stmt = conn.createStatement();
+
+  // Delete all existing discounts for this customer
+  stmt.executeUpdate("DELETE FROM discounts WHERE customer_id = " + customerId);
+
+  // Batch-insert the new discount rows
+  if (data.length > 0) {
+    var insertStmt = conn.prepareStatement(
+      "INSERT INTO discounts (product_id, customer_id, discount, fixed_discount) VALUES (?, ?, ?, ?)"
+    );
+    for (var i = 0; i < data.length; i++) {
+      insertStmt.setString(1, data[i][0]);   // product_id (column A)
+      insertStmt.setString(2, customerId);
+      insertStmt.setString(3, data[i][8]);   // discount (column I)
+      insertStmt.setString(4, Number(data[i][9])); // fixed_discount (column J)
+      insertStmt.addBatch();
+    }
+    insertStmt.executeBatch();
+  }
+
+  ss.toast("Discounts were saved successfully");
+}
+```
+
+## How Discounts Apply on Invoices
+
+When an invoice line item is calculated, the discount engine checks in this priority order:
+
+1. **Manual discount** — a one-off percentage entered directly in the invoice line item's discount dialog (overrides everything).
+2. **Customer-specific discount** — the `discount` or `fixed_discount` row from the `discounts` table for this customer + product combination (loaded into the invoice modal from `getAllFromDB('discounts')`).
+3. **Product default discount** — `def_discount` and `def_fixed_discount` from the `products` table.
+
+For quantity-break (`discount`) and fixed (`fixed_discount`) rules, the engine evaluates each applicable rule as an absolute cash amount and applies the one that gives the **largest discount** to the customer.
+
+## `discount` vs `fixed_discount`
+
+| Field | Type | Format | Example |
+|-------|------|--------|---------|
+| `discount` | string | Comma-separated `buy+free` rules | `"6+2,12+6"` — buy 6 get 2 free, or buy 12 get 6 free |
+| `fixed_discount` | numeric | Flat percentage off the line total | `15` — 15% off regardless of quantity |
+
+Both can be set simultaneously. The engine evaluates each independently and applies whichever produces the larger absolute discount for the actual quantity ordered.
+
+## Quick Reference
+
+<CardGroup cols={2}>
+  <Card title="Load Discounts" icon="download">
+    Enter customer ID in cell **H2**, then use **Arsinous menu → GET Discounts** or edit cell A1. The sheet is populated from row 5 with all products and any existing overrides for that customer.
+  </Card>
+  <Card title="Save Discounts" icon="floppy-disk">
+    After editing columns I and J, use **Arsinous menu → SAVE Discounts** or the sidebar Save button. All existing discounts for the customer are replaced with the current sheet values.
+  </Card>
+  <Card title="Discount Priority" icon="ranking-star">
+    Manual (invoice-level) → Customer-specific → Product default. The largest absolute discount amount wins when multiple quantity-break tiers are applicable.
+  </Card>
+  <Card title="Blank = Use Default" icon="circle-info">
+    Rows where both columns I and J are empty are not saved. Those products will continue to use the product-level `def_discount` and `def_fixed_discount` on invoices.
+  </Card>
+</CardGroup>

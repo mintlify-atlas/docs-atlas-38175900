@@ -1,0 +1,195 @@
+---
+title: "Record and Track Customer Payments"
+sidebarTitle: "Payments"
+description: "Create, edit, and filter customer payments in the P&D tab. Record payment type, date, amount, deposit date, and deposit reference number."
+---
+
+The Payments module tracks the money coming in against the invoices going out. Each payment record links a customer to a date, amount, payment type, and optional deposit details — letting you filter between undeposited cheques, cleared bank transfers, and everything in between directly from the **P&D** (Payments & Deposits) sheet. The Balance sheet brings invoices and payments together into a single per-customer ledger view, and editing or deleting a payment can be triggered from either tab.
+
+## The P&D Sheet
+
+The P&D sheet displays payments in reverse chronological order (most recent first). Data rows begin at row 7; rows 1–6 contain the filter controls that drive the query.
+
+| Column | MySQL field | Description |
+|--------|-------------|-------------|
+| A | `id` | Payment record ID |
+| B | `date` | Payment date |
+| C | `name` | Customer name (from JOIN with `customers`) |
+| D | `num` | Payment reference number |
+| E | `deposit_date` | Date the payment was deposited (nullable) |
+| F | `deposit_num` | Deposit reference number |
+| G | `amount` | Payment amount |
+| H | `comments` | Free-text notes |
+
+### Filter Controls
+
+| Cell | Filter | Effect |
+|------|--------|--------|
+| C1 | Start date | Lower bound of the payment date range |
+| C2 | End date | Upper bound of the payment date range |
+| E1 | Deposit filter type | `"Payments w/o Deposits"`, `"Payments with Deposits"`, or all |
+| D4 (index `[3][5]`) | Customer ID | Filter to a single customer; leave blank for all |
+
+<Note>
+  The P&D sheet has an `onEdit` trigger: editing cells **C1**, **C2**, **E1**, or **C4** automatically calls `updateCustomersPayments()` and refreshes the data. You do not need to use the menu — just change a filter value and the sheet updates itself.
+</Note>
+
+## Syncing Payments
+
+`updateCustomersPayments()` reads the filter cells, builds a dynamic SQL query, and writes results starting at row 7:
+
+```javascript
+// Excerpt from Payment/backend.gs
+function updateCustomersPayments() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName("P&D");
+  var data = sh.getDataRange().getValues();
+  sh.getRange("A7:H").clearContent();
+
+  var startDate = data[0][2];
+  var endDate   = data[1][2];
+  var type      = data[0][4];
+  var customer  = data[3][5];
+
+  var query = "SELECT customers_payments.id, date, customers.name, num, "
+            + "deposit_date, deposit_num, amount, comments "
+            + "FROM customers_payments "
+            + "LEFT JOIN customers ON customers_payments.customer_id = customers.id "
+            + "WHERE customer_id";
+
+  if (customer == "") {
+    query += " IS NOT NULL ";
+  } else {
+    query += " = '" + customer + "'";
+  }
+
+  if (type == "Payments w/o Deposits") {
+    query += " AND deposit_date IS NULL";
+  } else if (type == "Payments with Deposits") {
+    query += " AND deposit_date IS NOT NULL";
+  }
+
+  if (startDate != "") {
+    startDate = Utilities.formatDate(new Date(startDate),
+                  ss.getSpreadsheetTimeZone(), "yyyy-MM-dd");
+    query += " AND date >= '" + startDate + "'";
+  }
+  if (endDate != "") {
+    endDate = Utilities.formatDate(new Date(endDate),
+                ss.getSpreadsheetTimeZone(), "yyyy-MM-dd");
+    query += " AND date <= '" + endDate + "'";
+  }
+  // ... execute query, sort by date DESC, write to sheet
+}
+```
+
+You can also trigger a manual refresh via **Arsinous menu → Update Current Tab** while the P&D sheet is active.
+
+## Creating a Payment
+
+<Steps>
+  <Step title="Open the payment dialog">
+    Click **New Payment** in the sidebar or go to **Arsinous menu → Add Payment**. This calls `showPayment(null)`, which opens an 800 × 350 px Vuetify modal titled **Create Customer Payment**. The modal fetches the full customer list from MySQL on mount.
+  </Step>
+  <Step title="Select a customer">
+    Use the **Customer** autocomplete to find and select the paying customer. The **Save** button remains disabled until a customer is chosen.
+  </Step>
+  <Step title="Fill in payment details">
+    Complete the required fields:
+
+    - **Type** — select from `Payment`, `Credit Note`, or `Debit Note`
+    - **Payment number** (`num`) — your internal reference or cheque number
+    - **Date** — defaults to today; use the date-picker to change
+    - **Amount** — numeric field in euros (step 0.01)
+    - **Comments** — optional free-text notes
+
+    Optionally record deposit details when the payment has been banked:
+
+    - **Deposit number** (`deposit_num`) — bank deposit reference
+    - **Deposit date** (`deposit_date`) — date deposited; clearable if not yet deposited
+  </Step>
+  <Step title="Save the payment">
+    Click **Save**. The dialog calls `saveCustomerPaymentToDb(data)`, which inserts a new row into `customers_payments`:
+
+    ```sql
+    INSERT INTO customers_payments
+      (customer_id, type, date, amount, comments, num, deposit_date, deposit_num)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ```
+  </Step>
+  <Step title="P&D sheet refreshes">
+    After a successful save the modal closes. The P&D sheet will reflect the new payment on the next refresh (or immediately if auto-refresh fires via the `onEdit` trigger).
+  </Step>
+</Steps>
+
+## Editing a Payment
+
+Payments can be edited from either the **Balance** sheet or the **P&D** sheet:
+
+**From the Balance sheet:**
+
+1. Select the row where `type = "Payment"` (row must be at or below row 4).
+2. Go to **Arsinous menu → Edit Payment**. This calls `selectPaymentToEdit()`.
+3. `selectPaymentToEdit()` reads `id` from column A and `type` from column C, validates that `type == "Payment"`, then calls `showPayment(id)`.
+
+**From the P&D sheet:**
+
+1. Select any data row (row 7 or below).
+2. Go to **Arsinous menu → Edit Payment**. `selectPaymentToEdit()` validates that the active sheet is `P&D` and the row is a valid data row, then calls `showPayment(id)`.
+
+In both cases the modal opens in edit mode, fetches the existing payment record via `getAllFromDB('customers_payments', "WHERE id=" + id)`, and pre-fills all fields. After editing, clicking **Save** runs:
+
+```sql
+UPDATE customers_payments
+SET customer_id = ?, type = ?, date = ?, amount = ?,
+    comments = ?, num = ?, deposit_date = ?, deposit_num = ?
+WHERE id = ?
+```
+
+## Deleting a Payment
+
+Deletion is available from the **Balance** sheet (where `type = "Payment"`):
+
+1. Select the payment row.
+2. Go to **Arsinous menu → Delete Payment**. `selectPaymentToDelete()` validates the row, then shows a confirmation dialog displaying the payment type, date, and amount.
+3. Confirm the deletion. `deleteCustomerPayment(id)` executes:
+
+   ```sql
+   DELETE FROM customers_payments WHERE id = ?
+   ```
+
+4. `updateCustomersPayments()` is called automatically to refresh the P&D tab.
+
+## Payment Fields Reference
+
+<ParamField body="customer_id" type="integer" required>
+  Foreign key to the `customers` table. Set via the customer autocomplete in the modal.
+</ParamField>
+
+<ParamField body="type" type="string" default="Payment">
+  Payment classification. Free-text in the database but the modal provides a dropdown with: `Payment`, `Credit Note`, `Debit Note`.
+</ParamField>
+
+<ParamField body="date" type="date" required>
+  Date of the payment. Defaults to today in the modal.
+</ParamField>
+
+<ParamField body="amount" type="decimal" required>
+  Payment amount in euros.
+</ParamField>
+
+<ParamField body="num" type="string">
+  Payment reference number (cheque number, transfer reference, etc.).
+</ParamField>
+
+<ParamField body="deposit_date" type="date">
+  Date the payment was deposited to the bank. Nullable — leave blank for undeposited payments. Used by the `"Payments w/o Deposits"` filter to show outstanding items.
+</ParamField>
+
+<ParamField body="deposit_num" type="string">
+  Bank deposit slip or batch reference number.
+</ParamField>
+
+<ParamField body="comments" type="string">
+  Optional free-text notes about this payment.
+</ParamField>
